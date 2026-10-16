@@ -1,0 +1,10 @@
+{
+  "name": "anistream-optimizer",
+  "version": "1.2.2",
+  "description": "Userscript de automação e controles para players de anime",
+  "private": true,
+  "scripts": {
+    "check": "node --check src/AniStream_Optimizer.dev.js"
+  },
+  "license": "MIT"
+}
