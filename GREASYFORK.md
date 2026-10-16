@@ -16,13 +16,14 @@ Userscript para automatizar tarefas comuns ao assistir animes: iniciar a reprodu
 - **Aviso de pulo e Desfazer:** mostra um aviso visual curto quando um trecho é pulado. Quando o player permite, o aviso oferece **Desfazer**; `Ctrl+Z` também desfaz enquanto o aviso ainda está visível.
 - **Preferência de qualidade:** em players compatíveis com JW Player ou Plyr, permite escolher Automática, maior disponível, 1080p, 720p, 480p ou 360p. Em resoluções fixas, usa a opção disponível mais próxima. Automática é o padrão.
 - **Priorizar servidor FHD:** tenta priorizar fontes Full HD quando o site disponibiliza mais de um servidor/fonte.
-- **Menu flutuante único:** o botão verde abre os controles tanto no player normal quanto no expandido, sem inserir uma barra no fluxo da página. Inclui ações de próximo episódio, pular intro, expandir/recolher e alternadores de Auto Play, Auto Next, AniSkip e Auto Expandir. O menu fecha após alguns segundos sem interação.
-- **Botão flutuante reposicionável:** pode ser arrastado e sua posição é guardada. Com o teclado, os atalhos configurados movem o botão e leitores de tela recebem um anúncio da posição. Um clique abre o menu; no modo expandido, um toque duplo recolhe o player.
+- **Menu flutuante único:** o botão AO abre os controles tanto no player normal quanto no expandido, sem inserir uma barra no fluxo da página. Inclui ações de próximo episódio e pular intro, além de alternadores de Auto Play, Auto Next, AniSkip e Auto Expandir. Um clique abre o menu; clique duplo no botão principal alterna o modo expandido. O X compacto ao lado do botão fecha somente o menu.
+- **Identidade visual AO:** monograma A metálico, O esmeralda e play integrado, renderizado como SVG inline sem imagens externas.
+- **Botão flutuante reposicionável:** pode ser arrastado e sua posição é guardada. Com o teclado, os atalhos configurados movem o botão e leitores de tela recebem um anúncio da posição.
 - **Compatibilidade com páginas SPA:** acompanha mudanças de URL e de conteúdo sem exigir uma recarga completa da página.
 - **Players diferentes:** identifica e usa controles específicos de JW Player e Plyr quando disponíveis, com suporte de fallback para vídeo HTML5. O alcance das funções varia conforme o player e o site.
 - **Atalhos editáveis:** o painel **Atalhos e ajuda…** permite alterar as combinações, inclusive usando `Ctrl`, `Alt`, `Shift` e `Meta`. Também permite ajustar os tempos de avanço de intro/final e os passos de movimento do botão. Combinações duplicadas são recusadas.
 - **Atalhos globais opcionais:** podem ser ativados/desativados no painel ou pelo comando do Tampermonkey; os botões na interface continuam disponíveis.
-- **Acessibilidade:** menu operável por teclado, fechamento com `Esc`, estados anunciados com atributos ARIA, foco visível e atalhos ignorados enquanto o usuário digita em campos editáveis.
+- **Acessibilidade:** estados anunciados com atributos ARIA, foco visível e atalhos ignorados enquanto o usuário digita em campos editáveis.
 - **Preferências por site:** o script vem habilitado nos domínios abaixo. Pelo menu do Tampermonkey, é possível ativá-lo ou desativá-lo para o site atual.
 
 ## Sites habilitados por padrão
@@ -44,7 +45,7 @@ O userscript pode ser carregado em qualquer domínio pelo gerenciador, mas suas 
 2. Instale o AniStream Optimizer pelo botão de instalação desta página do Greasy Fork.
 3. Abra um episódio em um dos sites habilitados e permita o userscript no Tampermonkey.
 4. Abra o menu do Tampermonkey para ligar/desligar recursos, escolher qualidade, configurar atalhos, preparar a base offline ou ativar/desativar o script naquele site.
-5. Use o botão flutuante e a barra do AniStream para os comandos manuais. Em dispositivos móveis, toque no botão para abrir os comandos; toque duplo no botão expandido recolhe o player.
+5. Use o botão AO para os comandos manuais: um clique abre o menu e um clique duplo expande ou recolhe o player. Toque duplo funciona como alternância em dispositivos móveis compatíveis com o gesto.
 
 ## Atalhos padrão
 
@@ -58,7 +59,6 @@ Todos podem ser alterados em **Atalhos e ajuda…**. `Shift` junto a um atalho d
 | Expandir/recolher player | `T` |
 | Mover botão | `Alt` + setas |
 | Passo maior ao mover | `Shift` |
-| Fechar menu flutuante | `Escape` |
 | Desfazer pulo (enquanto o aviso aparece) | `Ctrl+Z` |
 
 Os avanços manuais padrão são **85 segundos** para a intro e **10 segundos** para a vinheta/final; ambos são configuráveis. O Auto Next antecipa **3 segundos** por padrão.

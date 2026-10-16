@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AniStream Optimizer (Autoplay + Auto-Next + SPA + AniSkip)
 // @namespace    http://tampermonkey.net/
-// @version      1.2.2
+// @version      1.3.0
 // @description  Autoplay persistente, auto-next, suporte a SPA, recusa automática de retomada e pulo de abertura/encerramento via AniSkip.
 // @author       Você (com apoio do Claude e do Gemini)
 // @license      MIT
@@ -17,6 +17,8 @@
 // @connect      release-assets.githubusercontent.com
 // @connect      graphql.anilist.co
 // @connect      api.aniskip.com
+// @downloadURL https://update.greasyfork.org/scripts/597329/AniStream%20Optimizer%20%28Autoplay%20%2B%20Auto-Next%20%2B%20SPA%20%2B%20AniSkip%29.user.js
+// @updateURL https://update.greasyfork.org/scripts/597329/AniStream%20Optimizer%20%28Autoplay%20%2B%20Auto-Next%20%2B%20SPA%20%2B%20AniSkip%29.meta.js
 // ==/UserScript==
 
 (function() {
@@ -291,7 +293,7 @@
     let teclaProximoEp = GM_getValue('tecla_proximo_ep', 'n');
     const CHAVE_ATALHOS_PERSONALIZADOS = 'atalhos_personalizados_v1';
     const ATALHOS_PADRAO_PERSONALIZADOS = {
-        next: 'n', intro: 'v', outro: 'q', theater: 't', closeMenu: 'Escape', undo: 'Ctrl+Z',
+        next: 'n', intro: 'v', outro: 'q', theater: 't', undo: 'Ctrl+Z',
         moveLeft: 'Alt+ArrowLeft', moveRight: 'Alt+ArrowRight', moveUp: 'Alt+ArrowUp', moveDown: 'Alt+ArrowDown',
         fastMoveModifier: 'Shift', moveStep: 12, moveLargeStep: 40
     };
@@ -390,6 +392,9 @@
     let cacheAniSkip = null;
     const framesAguardandoDadosAniSkip = new Set();
     let aniskipBuscado = false;
+    let aniskipBuscaEmAndamento = false;
+    let sequenciaBuscaAniSkip = 0;
+    let tentativasFalhaAniSkip = 0;
     let aniskipSolicitouDadosAoPai = false;
     let tentativasSolicitarDadosAniSkip = 0;
     let temporizadorSolicitarDadosAniSkip = null;
@@ -429,6 +434,44 @@
         } catch (e) {}
     }
 
+    function normalizarResultadosAniSkip(resultados) {
+        if (!Array.isArray(resultados)) return [];
+        return resultados.filter(item => {
+            const intervalo = item && item.interval;
+            return item && (item.skipType === 'op' || item.skipType === 'ed') &&
+                intervalo && Number.isFinite(intervalo.startTime) &&
+                Number.isFinite(intervalo.endTime) && intervalo.startTime >= 0 &&
+                intervalo.endTime > intervalo.startTime;
+        }).map(item => Object.assign({}, item, {
+            interval: Object.assign({}, item.interval),
+            jaPulou: false
+        }));
+    }
+
+    function aniskipMalIdValido(valor) {
+        const id = Number(valor);
+        return Number.isSafeInteger(id) && id > 0;
+    }
+
+    function agendarRetryAniSkip(aguardandoMetadados = false) {
+        aniskipBuscado = false;
+        let atraso;
+        if (aguardandoMetadados) {
+            atraso = tentativasLeituraAniSkip <= 20 ? 1500 : 15000;
+        } else {
+            atraso = Math.min(60000, 5000 * Math.pow(2, Math.min(tentativasFalhaAniSkip, 4)));
+            tentativasFalhaAniSkip++;
+        }
+        proximaBuscaAniSkipEm = Date.now() + atraso;
+        return atraso;
+    }
+
+    function aniskipBuscaAindaAtual(sequencia, epocaDaBusca, urlDaBusca) {
+        return sequencia === sequenciaBuscaAniSkip &&
+            epocaDaBusca === epoca &&
+            urlDaBusca === window.location.href;
+    }
+
     function transmitirDadosAniSkipParaFrames() {
         if (!ehJanelaPrincipal || !Array.isArray(cacheAniSkip) || !cacheAniSkip.length) return;
         const destinos = new Set(framesAguardandoDadosAniSkip);
@@ -456,12 +499,7 @@
     }
 
     function adiarBuscaAniSkipAteTituloCarregar() {
-        const siteAlvo = hostCorrespondeADominio(hostAtual, 'anroll.io') ||
-            hostCorrespondeADominio(hostAtual, 'animesonline.io');
-        if (!siteAlvo || tentativasLeituraAniSkip >= 20) return;
-        tentativasLeituraAniSkip++;
-        aniskipBuscado = false;
-        proximaBuscaAniSkipEm = Date.now() + 1500;
+        if (tentativasLeituraAniSkip < 20) tentativasLeituraAniSkip++;
     }
 
     let metadadosAnimeAtual = null;
@@ -469,6 +507,10 @@
 
     let autoTeatro = GM_getValue('ativar_teatro', false);
     let teatroAtivoNoVideo = false;
+    let expansaoTeatroPendente = false;
+    let solicitacaoTeatroAutoFHD = null;
+    let sequenciaSolicitacaoTeatro = 0;
+    let timerSolicitacaoTeatroAutoFHD = null;
     const pedidosExpandirNativo = new Map();
     let ultimoCliqueExpandirNativo = 0;
 
@@ -483,6 +525,10 @@
     let fallbackTentativas = 0;
     let watchdogTempo = 0;
     let indiceServidorFallback = -1;
+    let estadoAutoFHD = 'espera';
+    let tentativaAutoFHD = null;
+    let sequenciaTentativaAutoFHD = 0;
+    let estabilidadeListaServidores = { assinatura: '', desde: 0 };
 
     let epoca = 0;
     let ultimoReset = 0;
@@ -502,6 +548,9 @@
     // ==========================================
     function iniciarAniStreamNoFrameAutorizado() {
     let uiStatus, uiTempo, uiAP, uiAniSkip;
+    let fabTeatro = null;
+    let abrirMenuFlutuante = () => false;
+    let atualizarVisualFabExpandido = () => {};
 
     if (ehJanelaPrincipal) {
         GM_registerMenuCommand("🔴 Desativar neste site", () => {
@@ -618,7 +667,6 @@
                     ['Mover botão para cima', 'moveUp'],
                     ['Mover botão para baixo', 'moveDown'],
                     ['Passo maior ao mover', 'fastMoveModifier'],
-                    ['Fechar menu flutuante', 'escape'],
                     ['Desfazer pulo enquanto o aviso aparece', 'undo']
                 ];
                 atalhos.forEach(([nome, chave]) => {
@@ -666,7 +714,6 @@
                 criarCampo('Avanço da vinheta (segundos)', 'outroSeconds', 'number', segundosPularVinheta);
                 const configAoCriar = lerAtalhosPersonalizados();
                 criarCampo('Expandir/recolher player', 'theater', 'text', configAoCriar.theater);
-                criarCampo('Fechar menu flutuante', 'closeMenu', 'text', configAoCriar.closeMenu);
                 criarCampo('Desfazer pulo', 'undo', 'text', configAoCriar.undo);
                 criarCampo('Mover para a esquerda', 'moveLeft', 'text', configAoCriar.moveLeft);
                 criarCampo('Mover para a direita', 'moveRight', 'text', configAoCriar.moveRight);
@@ -691,9 +738,8 @@
                     const obter = nome => formulario.elements.namedItem(nome).value.trim();
                     const cfgAtual = lerAtalhosPersonalizados();
                     const novaConfig = { ...cfgAtual };
-                    ['next', 'intro', 'outro', 'theater', 'closeMenu', 'undo', 'moveLeft', 'moveRight', 'moveUp', 'moveDown'].forEach(chave => {
-                        const campo = chave === 'closeMenu' ? 'closeMenu' : chave;
-                        const analisado = analisarAtalho(obter(campo));
+                    ['next', 'intro', 'outro', 'theater', 'undo', 'moveLeft', 'moveRight', 'moveUp', 'moveDown'].forEach(chave => {
+                        const analisado = analisarAtalho(obter(chave));
                         if (!analisado) novaConfig[chave] = null;
                         else novaConfig[chave] = formatarAtalho(analisado);
                     });
@@ -702,8 +748,8 @@
                     novaConfig.fastMoveModifier = obter('fastMoveModifier');
                     novaConfig.moveStep = Number(obter('moveStep'));
                     novaConfig.moveLargeStep = Number(obter('moveLargeStep'));
-                    const atalhosValidos = ['next', 'intro', 'outro', 'theater', 'closeMenu', 'undo', 'moveLeft', 'moveRight', 'moveUp', 'moveDown'].every(chave => novaConfig[chave]);
-                    const combinacoes = ['next', 'intro', 'outro', 'theater', 'closeMenu', 'undo', 'moveLeft', 'moveRight', 'moveUp', 'moveDown'].map(chave => String(novaConfig[chave] || '').toLowerCase());
+                    const atalhosValidos = ['next', 'intro', 'outro', 'theater', 'undo', 'moveLeft', 'moveRight', 'moveUp', 'moveDown'].every(chave => novaConfig[chave]);
+                    const combinacoes = ['next', 'intro', 'outro', 'theater', 'undo', 'moveLeft', 'moveRight', 'moveUp', 'moveDown'].map(chave => String(novaConfig[chave] || '').toLowerCase());
                     const semConflitos = new Set(combinacoes).size === combinacoes.length;
                     if (!atalhosValidos || !semConflitos || !['Shift', 'Alt', 'Ctrl', 'Meta', 'Nenhum'].includes(novaConfig.fastMoveModifier) ||
                         !Number.isInteger(novaConfig.moveStep) || novaConfig.moveStep < 1 || novaConfig.moveStep > 200 ||
@@ -723,10 +769,15 @@
                     GM_setValue('tecla_pular_vinheta', teclaPularVinheta);
                     GM_setValue('segundos_pular_intro', segundosPularIntro);
                     GM_setValue('segundos_pular_vinheta', segundosPularVinheta);
-                    GM_setValue(CHAVE_ATALHOS_PERSONALIZADOS, novaConfig);
+                    // Preserva chaves antigas desconhecidas sem voltar a expô-las como atalhos ativos.
+                    const atalhosSalvosAnteriormente = GM_getValue(CHAVE_ATALHOS_PERSONALIZADOS, {});
+                    const configuracaoPersistida = atalhosSalvosAnteriormente &&
+                        typeof atalhosSalvosAnteriormente === 'object' && !Array.isArray(atalhosSalvosAnteriormente)
+                        ? { ...atalhosSalvosAnteriormente, ...novaConfig }
+                        : novaConfig;
+                    GM_setValue(CHAVE_ATALHOS_PERSONALIZADOS, configuracaoPersistida);
                     document.querySelectorAll('[data-au-acao="atalho-proximo"]').forEach(btn => { btn.title = `Próximo episódio (${next})`; });
                     document.querySelectorAll('[data-au-acao="atalho-intro"]').forEach(btn => { btn.title = `Pular intro (+${segundosPularIntro}s, ${intro})`; });
-                    document.querySelectorAll('[data-au-acao="atalho-teatro"]').forEach(btn => { btn.title = `Expandir/recolher player (${novaConfig.theater})`; });
                     fabTeatro.setAttribute('aria-keyshortcuts', [novaConfig.moveLeft, novaConfig.moveRight, novaConfig.moveUp, novaConfig.moveDown].join(' '));
                     atualizarAtalhosVisiveis();
                     status.textContent = 'Atalhos salvos.';
@@ -748,7 +799,6 @@
                         moveUp: cfg.moveUp,
                         moveDown: cfg.moveDown,
                         fastMoveModifier: `${cfg.fastMoveModifier} · ${cfg.moveLargeStep}px`,
-                        escape: cfg.closeMenu,
                         undo: cfg.undo
                     };
                     lista.querySelectorAll('[data-au-shortcut-value]').forEach(el => { el.textContent = valores[el.dataset.auShortcutValue] || ''; });
@@ -757,7 +807,7 @@
             }
 
             const cfgAtual = lerAtalhosPersonalizados();
-            ['next', 'intro', 'outro', 'theater', 'closeMenu', 'undo', 'moveLeft', 'moveRight', 'moveUp', 'moveDown', 'fastMoveModifier', 'moveStep', 'moveLargeStep'].forEach(chave => {
+            ['next', 'intro', 'outro', 'theater', 'undo', 'moveLeft', 'moveRight', 'moveUp', 'moveDown', 'fastMoveModifier', 'moveStep', 'moveLargeStep'].forEach(chave => {
                 const campo = overlay.querySelector(`[name="${chave}"]`);
                 if (campo) campo.value = cfgAtual[chave];
             });
@@ -793,7 +843,7 @@
         modalInfo.addEventListener('click', (e) => { if (e.target === modalInfo) fecharModalInfo(); });
         document.getElementById('au-info-fechar').onclick = fecharModalInfo;
 
-        let fabTeatro = document.createElement('button');
+        fabTeatro = document.createElement('button');
         fabTeatro.id = 'au-fab-teatro';
         fabTeatro.type = 'button';
         fabTeatro.setAttribute('aria-controls', 'au-control-bar');
@@ -801,69 +851,69 @@
         fabTeatro.setAttribute('aria-pressed', 'false');
         const atalhosFab = lerAtalhosPersonalizados();
         fabTeatro.setAttribute('aria-keyshortcuts', [atalhosFab.moveLeft, atalhosFab.moveRight, atalhosFab.moveUp, atalhosFab.moveDown].join(' '));
-        fabTeatro.setAttribute('aria-label', 'Abrir modo Expandir. Arraste para mover ou use os atalhos configurados.');
-        fabTeatro.innerHTML = iconeSvg('expand');
-        fabTeatro.title = 'Abrir Expandir';
+        fabTeatro.setAttribute('aria-label', 'Abrir comandos do player. Clique duas vezes para expandir ou recolher.');
+        fabTeatro.innerHTML = logoAOSvg('au-logo-ao-fab');
+        fabTeatro.title = 'Clique para abrir comandos; clique duas vezes para expandir ou recolher';
         const anuncioPosicaoFab = document.createElement('div');
         anuncioPosicaoFab.id = 'au-fab-position-status';
         anuncioPosicaoFab.setAttribute('role', 'status');
         anuncioPosicaoFab.setAttribute('aria-live', 'polite');
         anuncioPosicaoFab.setAttribute('aria-atomic', 'true');
         anuncioPosicaoFab.style.cssText = 'position:fixed!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important;';
-        let ultimoCliqueFabExpandido = 0;
+        let timerCliqueFab = null;
         let arrastoFab = null;
         let ignorarCliqueFabAte = 0;
-        const atualizarVisualFabExpandido = () => {
+        atualizarVisualFabExpandido = () => {
             const expandido = document.body.classList.contains('au-teatro-ativo');
             const barraControles = document.getElementById('au-control-bar');
             const menuAberto = !!barraControles && document.body.classList.contains('au-menu-flutuante-aberto');
-            const estadoVisual = `${expandido}-${menuAberto}`;
             if (barraControles) fabTeatro.setAttribute('aria-controls', 'au-control-bar');
             else fabTeatro.removeAttribute('aria-controls');
-            if (fabTeatro.dataset.auExpanded !== estadoVisual) {
-                fabTeatro.dataset.auExpanded = estadoVisual;
-                fabTeatro.innerHTML = iconeSvg(expandido ? 'collapse' : 'expand');
-            }
-            fabTeatro.setAttribute('aria-label', 'Modo de expansão do player');
+            fabTeatro.dataset.auExpanded = String(expandido);
+            fabTeatro.setAttribute('aria-label', `Abrir comandos do player. Clique duas vezes para ${expandido ? 'recolher' : 'expandir'} o player.`);
             const atalhosFab = lerAtalhosPersonalizados();
             fabTeatro.setAttribute('aria-keyshortcuts', [atalhosFab.moveLeft, atalhosFab.moveRight, atalhosFab.moveUp, atalhosFab.moveDown].join(' '));
             fabTeatro.setAttribute('aria-description', `${expandido ? 'Player expandido.' : 'Player recolhido.'} ${menuAberto ? 'Comandos abertos.' : 'Comandos fechados.'} Arraste ou use ${atalhosFab.moveLeft}, ${atalhosFab.moveRight}, ${atalhosFab.moveUp} e ${atalhosFab.moveDown} para mover.`);
             fabTeatro.setAttribute('aria-expanded', String(menuAberto));
             fabTeatro.setAttribute('aria-pressed', String(expandido));
-            fabTeatro.title = expandido
-                ? 'Arraste para mover; toque abre os comandos; toque duplo recolhe'
-                : 'Arraste para mover; toque para expandir';
-            document.querySelectorAll('[data-au-acao="atalho-teatro"]').forEach(btn => {
-                if (btn.dataset.auExpanded === estadoVisual) return;
-                btn.dataset.auExpanded = estadoVisual;
-                const fecharMenu = expandido && menuAberto;
-                const rotulo = fecharMenu ? 'Fechar menu' : (expandido ? 'Recolher' : 'Expandir');
-                btn.innerHTML = `${iconeSvg(fecharMenu ? 'close' : (expandido ? 'collapse' : 'expand'))}<span>${rotulo}</span>`;
-                const teclasUI = lerAtalhosPersonalizados();
-                btn.title = fecharMenu ? `Fechar menu (${teclasUI.closeMenu})` : (expandido ? 'Recolher player (toque duplo)' : `Expandir player (${teclasUI.theater})`);
-                btn.setAttribute('aria-label', fecharMenu ? 'Fechar menu' : `${rotulo} player`);
-            });
+            fabTeatro.title = `Clique para abrir comandos; clique duas vezes para ${expandido ? 'recolher' : 'expandir'} o player`;
         };
         new MutationObserver(atualizarVisualFabExpandido).observe(document.body, {
             attributes: true,
             attributeFilter: ['class']
         });
-        const abrirMenuFlutuante = () => {
+        abrirMenuFlutuante = () => {
+            resetarInatividade();
             if (!document.getElementById('au-control-bar')) return false;
             document.body.classList.add('au-menu-flutuante-aberto');
-            fabTeatro.setAttribute('aria-label', 'Comandos do player abertos. Arraste para mover; toque duas vezes para recolher.');
-            fabTeatro.title = 'Arraste para mover; toque duplo recolhe';
             atualizarVisualFabExpandido();
-            resetarInatividade();
             requestAnimationFrame(posicionarMenuFlutuante);
             return true;
         };
-        fabTeatro.addEventListener('mouseenter', abrirMenuFlutuante);
+        let botaoFecharMenu = null;
         const posicaoFabSalva = GM_getValue('au_fab_posicao_v1', null);
         const posicionarMenuFlutuante = () => {
             const barra = document.getElementById('au-control-bar');
             if (!barra || !document.body.classList.contains('au-menu-flutuante-aberto')) return;
             const fab = fabTeatro.getBoundingClientRect();
+            if (botaoFecharMenu) {
+                const tamanhoFechar = botaoFecharMenu.offsetWidth || 18;
+                const margem = 8;
+                const espacamento = 6;
+                let left = fab.right + espacamento;
+                if (left + tamanhoFechar > window.innerWidth - margem) {
+                    left = fab.left - espacamento - tamanhoFechar;
+                }
+                left = Math.max(margem, Math.min(left, window.innerWidth - tamanhoFechar - margem));
+                const top = Math.max(margem, Math.min(
+                    fab.top + (fab.height - tamanhoFechar) / 2,
+                    window.innerHeight - tamanhoFechar - margem
+                ));
+                botaoFecharMenu.style.setProperty('left', `${left}px`, 'important');
+                botaoFecharMenu.style.setProperty('top', `${top}px`, 'important');
+                botaoFecharMenu.style.setProperty('right', 'auto', 'important');
+                botaoFecharMenu.style.setProperty('bottom', 'auto', 'important');
+            }
             const tamanho = barra.getBoundingClientRect();
             if (!tamanho.width || !tamanho.height) return;
             const margem = 8;
@@ -931,6 +981,7 @@
             }, 220);
         });
         fabTeatro.addEventListener('pointerdown', e => {
+            resetarInatividade();
             if (!e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
             const rect = fabTeatro.getBoundingClientRect();
             arrastoFab = { id: e.pointerId, x: e.clientX, y: e.clientY, left: rect.left, top: rect.top, moveu: false };
@@ -964,19 +1015,20 @@
                 e.stopImmediatePropagation();
                 return;
             }
-            if (document.body.classList.contains('au-teatro-ativo')) {
-                const agora = Date.now();
-                if (agora - ultimoCliqueFabExpandido <= 650) {
-                    ultimoCliqueFabExpandido = 0;
-                    definirModoTeatro(false);
-                    return;
-                }
-                ultimoCliqueFabExpandido = agora;
-                abrirMenuFlutuante();
+            if (timerCliqueFab !== null) {
+                clearTimeout(timerCliqueFab);
+                timerCliqueFab = null;
+                const expandido = document.body.classList.contains('au-teatro-ativo');
+                document.body.classList.remove('au-menu-flutuante-aberto');
+                atualizarVisualFabExpandido();
+                definirModoTeatro(!expandido);
                 resetarInatividade();
+                return;
             }
-            else abrirMenuFlutuante();
-            if (!document.body.classList.contains('au-teatro-ativo')) resetarInatividade();
+            timerCliqueFab = setTimeout(() => {
+                timerCliqueFab = null;
+                abrirMenuFlutuante();
+            }, 350);
         });
         document.body.appendChild(fabTeatro);
         document.body.appendChild(anuncioPosicaoFab);
@@ -1001,8 +1053,25 @@
             controlBar.id = 'au-control-bar';
             controlBar.setAttribute('role', 'group');
             controlBar.setAttribute('aria-label', 'Comandos do player');
-            controlBar.innerHTML = gerarHtmlBotoesBarra(false);
+            controlBar.innerHTML = gerarHtmlBotoesBarra();
+            const marcaAniStream = document.createElement('span');
+            marcaAniStream.className = 'au-menu-brand';
+            marcaAniStream.setAttribute('aria-hidden', 'true');
+            marcaAniStream.innerHTML = logoAOSvg('au-logo-ao-menu');
+            controlBar.insertBefore(marcaAniStream, controlBar.firstChild);
+            botaoFecharMenu = document.createElement('button');
+            botaoFecharMenu.id = 'au-menu-fechar';
+            botaoFecharMenu.type = 'button';
+            botaoFecharMenu.setAttribute('aria-label', 'Fechar menu de comandos do player');
+            botaoFecharMenu.title = 'Fechar comandos';
+            botaoFecharMenu.textContent = '×';
+            botaoFecharMenu.addEventListener('click', e => {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                fecharMenuFlutuante();
+            });
             document.body.appendChild(controlBar);
+            document.body.appendChild(botaoFecharMenu);
             ligarBotoesDaBarra(controlBar);
             conectarStatusNaBarra(controlBar);
             atualizarVisualFabExpandido();
@@ -1057,6 +1126,62 @@
         if (e.data && e.data.app === 'ANIME_V44') {
             if (e.data.acao === 'RESET') {
                 reiniciarEstadoParaNovoEpisodio('reset vindo do frame pai', 'remoto');
+            } else if (e.data.acao === 'TEATRO_EXECUTAR_SOLICITACAO') {
+                if (!e.data.ligar) {
+                    if (e.data.id === sequenciaSolicitacaoTeatro && e.data.epoca === epoca) {
+                        clearTimeout(timerSolicitacaoTeatroAutoFHD);
+                        timerSolicitacaoTeatroAutoFHD = null;
+                        expansaoTeatroPendente = false;
+                        desativarModoTeatro(videoAtivo);
+                    }
+                } else if (expansaoTeatroPendente &&
+                    e.data.id === sequenciaSolicitacaoTeatro &&
+                    e.data.epoca === epoca) {
+                    clearTimeout(timerSolicitacaoTeatroAutoFHD);
+                    timerSolicitacaoTeatroAutoFHD = null;
+                    expansaoTeatroPendente = false;
+                    const videoAtual = obterVideoAtualParaTeatro(null, false);
+                    if (videoAtual) ativarModoTeatro(videoAtual);
+                }
+            } else if (e.data.acao === 'TEATRO_SOLICITACAO_ACK') {
+                if (e.data.id === sequenciaSolicitacaoTeatro && e.data.epoca === epoca) {
+                    clearTimeout(timerSolicitacaoTeatroAutoFHD);
+                    timerSolicitacaoTeatroAutoFHD = null;
+                }
+            } else if (e.data.acao === 'TEATRO_SOLICITAR') {
+                const iframeSolicitanteAtual = Array.from(document.querySelectorAll('iframe'))
+                    .some(frame => frame.contentWindow === e.source);
+                if (!iframeSolicitanteAtual) return;
+                const solicitacao = {
+                    origem: 'iframe',
+                    source: e.source,
+                    ligar: !!e.data.ligar,
+                    id: e.data.id,
+                    epoca: epoca,
+                    epocaSolicitante: e.data.epoca
+                };
+                try {
+                    e.source.postMessage({
+                        app: 'ANIME_V44',
+                        acao: 'TEATRO_SOLICITACAO_ACK',
+                        id: solicitacao.id,
+                        epoca: solicitacao.epocaSolicitante
+                    }, '*');
+                } catch (err) {}
+                if (!solicitacao.ligar) {
+                    if (solicitacaoTeatroAutoFHD &&
+                        solicitacaoTeatroAutoFHD.origem === 'iframe' &&
+                        solicitacaoTeatroAutoFHD.source === e.source) {
+                        solicitacaoTeatroAutoFHD = null;
+                        expansaoTeatroPendente = false;
+                    }
+                    executarSolicitacaoTeatroAutoFHD(solicitacao, null, false);
+                } else if (autoFHDAguardandoTeatro()) {
+                    solicitacaoTeatroAutoFHD = solicitacao;
+                    expansaoTeatroPendente = true;
+                } else {
+                    executarSolicitacaoTeatroAutoFHD(solicitacao, null, false);
+                }
             } else if (e.data.acao === 'TOGGLE_TEATRO') {
                 if (videoAtivo) alternarModoTeatro();
                 else {
@@ -1066,27 +1191,40 @@
                 }
             } else if (e.data.acao === 'SET_TEATRO') {
                 const ligar = !!e.data.ligar;
+                if (!ligar && expansaoTeatroPendente) {
+                    solicitarModoTeatro(videoAtivo, false);
+                    return;
+                }
                 if (videoAtivo) {
-                    if (ligar && !teatroAtivoNoVideo) ativarModoTeatro(videoAtivo);
-                    else if (!ligar && teatroAtivoNoVideo) desativarModoTeatro(videoAtivo);
+                    if (ligar && !teatroAtivoNoVideo) solicitarModoTeatro(videoAtivo, true);
+                    else if (!ligar && (teatroAtivoNoVideo || expansaoTeatroPendente)) solicitarModoTeatro(videoAtivo, false);
                 } else {
                     document.querySelectorAll('iframe').forEach(i => {
                         try { i.contentWindow.postMessage({ app: 'ANIME_V44', acao: 'SET_TEATRO', ligar }, '*'); } catch(err){}
                     });
                 }
             } else if (e.data.acao === 'ANISKIP_DADOS') {
-                cacheAniSkip = e.data.dados;
-                clearTimeout(temporizadorSolicitarDadosAniSkip);
-                temporizadorSolicitarDadosAniSkip = null;
-                aniskipSolicitouDadosAoPai = true;
-                tentativasSolicitarDadosAniSkip = 0;
-                document.querySelectorAll('iframe').forEach(i => { try { i.contentWindow.postMessage(e.data, '*'); } catch (err) {} });
-                aplicarPuloAniSkipSeJaEstiverNoTrecho();
+                const temposRecebidos = normalizarResultadosAniSkip(e.data.dados);
+                if (temposRecebidos.length) {
+                    cacheAniSkip = temposRecebidos;
+                    clearTimeout(temporizadorSolicitarDadosAniSkip);
+                    temporizadorSolicitarDadosAniSkip = null;
+                    aniskipSolicitouDadosAoPai = true;
+                    tentativasSolicitarDadosAniSkip = 0;
+                    document.querySelectorAll('iframe').forEach(i => { try { i.contentWindow.postMessage({ app: 'ANIME_V44', acao: 'ANISKIP_DADOS', dados: temposRecebidos }, '*'); } catch (err) {} });
+                    aplicarPuloAniSkipSeJaEstiverNoTrecho();
+                }
             }
         }
         else if (e.data && e.data.app === 'ANIME_UNIVERSAL') {
             if (e.data.acao === 'TEATRO_ON' || e.data.acao === 'TEATRO_OFF') {
                 const ligar = e.data.acao === 'TEATRO_ON';
+                if (!ligar && solicitacaoTeatroAutoFHD &&
+                    solicitacaoTeatroAutoFHD.origem === 'iframe' &&
+                    solicitacaoTeatroAutoFHD.source === e.source) {
+                    solicitacaoTeatroAutoFHD = null;
+                    expansaoTeatroPendente = false;
+                }
                 try {
                     document.body.classList.toggle('au-teatro-ativo', ligar);
                     if (!ligar) document.body.classList.remove('au-menu-flutuante-aberto');
@@ -1131,6 +1269,7 @@
             else if (e.data.acao === 'TEATRO_IDLE' || e.data.acao === 'TEATRO_ACTIVE') {
                 const ocioso = e.data.acao === 'TEATRO_IDLE';
                 document.body.classList.toggle('au-idle', ocioso);
+                if (fabTeatro) fabTeatro.classList.toggle('au-fab-inativo', ocioso);
                 redimensionarPlayerExpandido(ocioso);
                 if (!ocioso) resetarInatividade(false);
                 if (window === window.top || e.data.cascata) {
@@ -1541,6 +1680,7 @@
     }
 
     function avancarParaProximoEpisodio(manual = false) {
+        if (!manual && estadoAutoFHD === 'verificando') return;
         if (jaAvancou || (!autoNext && !manual)) return;
         if (!manual && siteUsaAutoNextNativo()) return;
         jaAvancou = true;
@@ -1607,23 +1747,312 @@
         }
     }
 
+    const SELETORES_BOTOES_SERVIDOR = '[data-player-name], [data-source-name], [role="tab"], .animeq-player__server, .dropdown-source, .server-item, .player-tab, .player-server button, .server-list button, .servers button';
+    const REGEX_SERVIDOR_FULLHD = /\b(?:FHD|FULL\s*HD|1080P?)\b/i;
+
+    function obterRotuloDoBotaoServidor(botao) {
+        const rotulos = [botao.getAttribute('data-player-name'), botao.getAttribute('data-source-name'),
+            botao.getAttribute('aria-label'), botao.getAttribute('title'), botao.textContent]
+            .filter(Boolean).map(texto => String(texto).trim().replace(/\s+/g, ' '))
+            .filter(texto => texto.length > 0 && texto.length <= 50);
+        return rotulos.find(texto => REGEX_SERVIDOR_FULLHD.test(texto)) || rotulos[0] || '';
+    }
+
+    function obterBotoesDeServidor(docs = [document]) {
+        const botoes = [];
+        for (const doc of docs) {
+            try {
+                doc.querySelectorAll(SELETORES_BOTOES_SERVIDOR).forEach(botao => {
+                    const rotulo = obterRotuloDoBotaoServidor(botao);
+                    if (!rotulo || !botao.isConnected || botao.disabled ||
+                        botao.getAttribute('aria-disabled') === 'true') return;
+                    const href = botao.getAttribute('href');
+                    if (botao.tagName === 'A' && href && !/^(#|javascript:)/i.test(href) &&
+                        botao.href !== doc.location.href) return;
+                    if (botao.closest('nav, header, [role="navigation"], .navbar, .menu')) return;
+                    if (!botao.matches('button, [role="tab"]') &&
+                        botao.querySelector('button, a[href], [role="tab"]')) return;
+                    const rect = botao.getBoundingClientRect();
+                    if (rect.width <= 0 || rect.height <= 0 || rect.width > 800 || rect.height > 160) return;
+                    botoes.push({ botao, rotulo });
+                });
+            } catch (e) {}
+        }
+        return botoes.filter((item, indice, todos) =>
+            todos.findIndex(outro => outro.botao === item.botao) === indice);
+    }
+
+    function botaoServidorEstaAtivo(botao) {
+        const classes = (botao.getAttribute('class') || '').toLowerCase();
+        return /\b(active|is-active|selected|selecionado|ativo)\b/.test(classes) ||
+            botao.getAttribute('aria-selected') === 'true' ||
+            botao.getAttribute('aria-pressed') === 'true' ||
+            botao.getAttribute('aria-current') === 'true' ||
+            botao.getAttribute('data-active') === 'true';
+    }
+
+    function estadoAutoFHDVerificando() {
+        return estadoAutoFHD === 'verificando';
+    }
+
+    function autoFHDControlandoSelecao() {
+        return estadoAutoFHDVerificando() ||
+            (estadoAutoFHD === 'espera' && (!!tentativaAutoFHD || (ehJanelaPrincipal && autoFHD)));
+    }
+
+    function autoFHDAguardandoTeatro() {
+        return ehJanelaPrincipal && autoFHD && estadoAutoFHD !== 'concluido';
+    }
+
+    function obterVideoAtualParaTeatro(tentativa, sucesso) {
+        const videos = obterVideosDoPlayer().filter(video => {
+            try { return video.isConnected; } catch (e) { return false; }
+        });
+        const confirmado = sucesso && tentativa && tentativa.videoConfirmado;
+        if (sucesso && tentativa) {
+            if (confirmado && videos.includes(confirmado) &&
+                (confirmado.currentSrc || confirmado.src || '') === tentativa.fonteVideoConfirmado &&
+                !confirmado.paused && !confirmado.ended && confirmado.videoWidth > 0 &&
+                confirmado.videoHeight > 0 && confirmado.readyState >= 2) {
+                return confirmado;
+            }
+            return null;
+        }
+        return videos.find(video => !video.paused && !video.ended &&
+                video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= 2) ||
+            videos.find(video => !video.paused && !video.ended) ||
+            videos.find(video => video.readyState >= 1) ||
+            null;
+    }
+
+    function executarSolicitacaoTeatroAutoFHD(solicitacao, tentativa, sucesso) {
+        if (!solicitacao) return;
+        expansaoTeatroPendente = false;
+        if (solicitacao.epoca !== epoca) return;
+        if (solicitacao.origem === 'iframe') {
+            try {
+                const frameAtual = Array.from(document.querySelectorAll('iframe'))
+                    .some(frame => frame.contentWindow === solicitacao.source);
+                if (!frameAtual) return;
+                solicitacao.source.postMessage({
+                    app: 'ANIME_V44',
+                    acao: 'TEATRO_EXECUTAR_SOLICITACAO',
+                    ligar: solicitacao.ligar,
+                    id: solicitacao.id,
+                    epoca: solicitacao.epocaSolicitante
+                }, '*');
+            } catch (e) {}
+            return;
+        }
+
+        expansaoTeatroPendente = false;
+        const video = obterVideoAtualParaTeatro(tentativa, sucesso);
+        if (solicitacao.ligar) {
+            if (video) ativarModoTeatro(video);
+        } else {
+            desativarModoTeatro(video || videoAtivo);
+        }
+    }
+
+    function liberarSolicitacaoTeatroAutoFHD(tentativa, sucesso) {
+        const solicitacao = solicitacaoTeatroAutoFHD;
+        solicitacaoTeatroAutoFHD = null;
+        if (solicitacao && solicitacao.origem === 'local' && solicitacao.tentativaId != null &&
+            (!tentativa || tentativa.id !== solicitacao.tentativaId)) {
+            expansaoTeatroPendente = false;
+            return;
+        }
+        executarSolicitacaoTeatroAutoFHD(solicitacao, tentativa, sucesso);
+    }
+
+    function concluirTentativaAutoFHD(mensagem, sucesso = false) {
+        const tentativa = tentativaAutoFHD;
+        estadoAutoFHD = 'concluido';
+        tentouMudarQualidade = true;
+        tentativaAutoFHD = null;
+        if (mensagem) exibirMensagemBreveNoPainel(mensagem);
+        liberarSolicitacaoTeatroAutoFHD(tentativa, sucesso);
+    }
+
+    function obterVideosDoPlayer() {
+        const docs = coletarTodosOsDocumentosIncluindoIframes(document, [], 0);
+        return listarTodosOsVideosEncontrados(docs);
+    }
+
+    function videoEstaTocandoHaMaisDeVinteSegundos(video) {
+        if (!video || video.paused || video.ended) return false;
+        const tempoAtual = Number(video.currentTime) || 0;
+        const estado = obterOuCriarEstadoDoVideo(video);
+        return tempoAtual > 20 || (estado.tPlaying > 0 && Date.now() - estado.tPlaying > 20000);
+    }
+
+    function tentarRestaurarServidorAnterior(tentativa) {
+        const anterior = tentativa && tentativa.servidorAnterior;
+        if (!anterior || !anterior.isConnected) return false;
+        const atuais = obterBotoesDeServidor(coletarTodosOsDocumentosIncluindoIframes(document, [], 0));
+        if (!atuais.some(item => item.botao === anterior)) return false;
+        try {
+            anterior.click();
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function falharTentativaAutoFHD(mensagem) {
+        const tentativa = tentativaAutoFHD;
+        estadoAutoFHD = 'concluido';
+        tentouMudarQualidade = true;
+        tentativaAutoFHD = null;
+        if (tentativa) {
+            tentativa.videosAnteriores.forEach(video => {
+                try {
+                    if (video.isConnected) {
+                        video.pause();
+                        video.muted = true;
+                    }
+                } catch (e) {}
+            });
+        }
+        const restaurado = tentarRestaurarServidorAnterior(tentativa);
+        exibirMensagemBreveNoPainel(restaurado
+            ? `${mensagem} Voltando ao servidor anterior.`
+            : `${mensagem} O servidor anterior não pôde ser identificado com segurança.`);
+        liberarSolicitacaoTeatroAutoFHD(tentativa, false);
+    }
+
+    function atualizarAutoFHD() {
+        if (!ehJanelaPrincipal || estadoAutoFHD === 'concluido') return;
+        if (!autoFHD && !estadoAutoFHDVerificando()) {
+            const tentativaCancelada = tentativaAutoFHD;
+            tentativaAutoFHD = null;
+            estabilidadeListaServidores = { assinatura: '', desde: 0 };
+            liberarSolicitacaoTeatroAutoFHD(tentativaCancelada, false);
+            return;
+        }
+        const agora = Date.now();
+        const docs = coletarTodosOsDocumentosIncluindoIframes(document, [], 0);
+        const servidores = obterBotoesDeServidor(docs);
+        const fullHD = servidores.filter(item => REGEX_SERVIDOR_FULLHD.test(item.rotulo));
+
+        if (estadoAutoFHD === 'espera') {
+            if (fullHD.some(item => botaoServidorEstaAtivo(item.botao))) {
+                concluirTentativaAutoFHD('');
+                return;
+            }
+            if (!tentativaAutoFHD) {
+                tentativaAutoFHD = { epoca, iniciadaEm: agora, id: ++sequenciaTentativaAutoFHD };
+            }
+            if (tentativaAutoFHD.epoca !== epoca) return;
+            const videoAntigoTocando = obterVideosDoPlayer().find(videoEstaTocandoHaMaisDeVinteSegundos);
+            if (videoAntigoTocando) {
+                concluirTentativaAutoFHD('⏭️ Auto-FHD ignorado: o vídeo já está em reprodução há mais de 20 segundos.');
+                return;
+            }
+
+            const assinatura = servidores.map(item => item.rotulo.toLowerCase()).join('|');
+            if (assinatura && assinatura === estabilidadeListaServidores.assinatura) {
+                if (!estabilidadeListaServidores.desde) estabilidadeListaServidores.desde = agora;
+            } else {
+                estabilidadeListaServidores = { assinatura, desde: assinatura ? agora : 0 };
+            }
+
+            if (agora - tentativaAutoFHD.iniciadaEm >= 15000) {
+                concluirTentativaAutoFHD('⏳ Auto-FHD cancelado: a lista de servidores não estabilizou a tempo.');
+                return;
+            }
+            if (agora - tentativaAutoFHD.iniciadaEm < 2000 ||
+                !estabilidadeListaServidores.desde ||
+                agora - estabilidadeListaServidores.desde < 1200) return;
+            if (fullHD.length !== 1) {
+                concluirTentativaAutoFHD(fullHD.length
+                    ? '⚠️ Auto-FHD cancelado: há mais de um botão Full HD e a seleção não é segura.'
+                    : 'ℹ️ Auto-FHD: servidor Full HD não encontrado.');
+                return;
+            }
+
+            const anteriorAtivo = servidores.filter(item => botaoServidorEstaAtivo(item.botao));
+            tentativaAutoFHD.servidorAnterior = anteriorAtivo.length === 1 ? anteriorAtivo[0].botao : null;
+            tentativaAutoFHD.botaoFullHD = fullHD[0].botao;
+            tentativaAutoFHD.videosAnteriores = new Set(listarTodosOsVideosEncontrados(docs));
+            tentativaAutoFHD.fontesVideosAnteriores = new Map(
+                Array.from(tentativaAutoFHD.videosAnteriores, video => [video, video.currentSrc || video.src || ''])
+            );
+            tentativaAutoFHD.fontesVideosAposTroca = new Map();
+            tentativaAutoFHD.mudoAnteriorDosVideos = new Map(
+                Array.from(tentativaAutoFHD.videosAnteriores, video => [video, video.muted])
+            );
+            tentativaAutoFHD.verificacaoIniciadaEm = agora;
+            tentativaAutoFHD.ultimaAmostra = new Map();
+            tentativaAutoFHD.telaPretaDesde = 0;
+
+            tentativaAutoFHD.videosAnteriores.forEach(video => {
+                try {
+                    video.pause();
+                    video.muted = true;
+                } catch (e) {}
+            });
+            estadoAutoFHD = 'verificando';
+            watchdogTempo = 0;
+            try {
+                fullHD[0].botao.click();
+                exibirMensagemBreveNoPainel('📺 Testando servidor Full HD...');
+            } catch (e) {
+                falharTentativaAutoFHD('⚠️ Não foi possível selecionar o servidor Full HD.');
+            }
+            return;
+        }
+
+        if (estadoAutoFHD !== 'verificando' || !tentativaAutoFHD ||
+            tentativaAutoFHD.epoca !== epoca) return;
+
+        const videos = listarTodosOsVideosEncontrados(docs);
+        let telaPretaAvancando = false;
+        for (const video of videos) {
+            const tempo = Number(video.currentTime) || 0;
+            const amostraAnterior = tentativaAutoFHD.ultimaAmostra.get(video);
+            const avancou = !!(amostraAnterior && tempo > amostraAnterior.tempo + 0.08);
+            tentativaAutoFHD.ultimaAmostra.set(video, { tempo, em: agora });
+
+            if (video.paused || video.ended) continue;
+            if (video.videoWidth > 0 && video.videoHeight > 0 &&
+                video.readyState >= 2 && avancou && !video.seeking) {
+                tentativaAutoFHD.videoConfirmado = video;
+                tentativaAutoFHD.fonteVideoConfirmado = video.currentSrc || video.src || '';
+                concluirTentativaAutoFHD('✅ Servidor Full HD reproduzindo com imagem.', true);
+                return;
+            }
+            if (video.videoWidth === 0 && avancou) telaPretaAvancando = true;
+        }
+
+        if (telaPretaAvancando) {
+            if (!tentativaAutoFHD.telaPretaDesde) tentativaAutoFHD.telaPretaDesde = agora;
+            else if (agora - tentativaAutoFHD.telaPretaDesde >= 1500) {
+                falharTentativaAutoFHD('⚠️ O servidor Full HD avançou sem imagem (tela preta).');
+                return;
+            }
+        } else {
+            tentativaAutoFHD.telaPretaDesde = 0;
+        }
+
+        if (agora - tentativaAutoFHD.verificacaoIniciadaEm >= 10000) {
+            falharTentativaAutoFHD('⚠️ Não foi confirmada reprodução com imagem no servidor Full HD.');
+        }
+    }
+
     function tentarClicarProximoServidor() {
-        if (fallbackTentativas >= 4 || jaAvancou) return;
+        if (autoFHDControlandoSelecao() || fallbackTentativas >= 4 || jaAvancou) return;
         fallbackTentativas++;
         watchdogTempo = 0;
 
         const raizAnimeq = document.querySelector('[id^="animeq-player-"]');
-        const seletoresServidor = '.animeq-player__server, .dropdown-source, [data-player-name], [data-source-name], .server-item, .player-tab, [role="tab"], [aria-controls]';
-        let botoes = Array.from((raizAnimeq || document).querySelectorAll(seletoresServidor));
-        let servidores = botoes.filter(btn => {
-            let ehLinkReal = btn.tagName === 'A' && btn.getAttribute('href') && !/^(#|javascript:)/i.test(btn.getAttribute('href')) && btn.href !== window.location.href;
-            return !ehLinkReal && btn.offsetParent !== null;
-        });
+        const servidores = obterBotoesDeServidor([raizAnimeq ? raizAnimeq.ownerDocument : document])
+            .map(item => item.botao).filter(btn => !raizAnimeq || raizAnimeq.contains(btn));
 
         if (servidores.length <= 1) return;
 
         if (indiceServidorFallback === -1) {
-            let idx = servidores.findIndex(btn => btn.classList.contains('active') || btn.classList.contains('is-active') || btn.classList.contains('selected') || btn.getAttribute('aria-selected') === 'true' || btn.getAttribute('aria-pressed') === 'true');
+            let idx = servidores.findIndex(botaoServidorEstaAtivo);
             indiceServidorFallback = idx !== -1 ? idx : 0;
         }
 
@@ -1636,6 +2065,7 @@
     }
 
     function verificarSeEpisodioEstaTerminando(atual, total) {
+        if (estadoAutoFHDVerificando()) return;
         if (total - atual > tempoPulo + 2) armado = true;
         if (armado && total - atual <= tempoPulo) avancarParaProximoEpisodio();
     }
@@ -1879,6 +2309,7 @@
     }
 
     function executarAutoClickerDePlayers() {
+        if (estadoAutoFHDVerificando()) return;
         const candidatos = document.querySelectorAll(SELETORES_AUTOCLICK_INICIAR + ', ' + SELETORES_AUTOCLICK_ALTERNAR);
         if (!candidatos.length) return;
         let docTemVideoTocando = null;
@@ -1929,29 +2360,13 @@
 
     {
         setInterval(() => {
-            if (jaAvancou || !autoPlay) return;
+            if (jaAvancou) return;
 
-            try { executarAutoClickerDePlayers(); } catch (e) {}
-
-            if (autoFHD && ehJanelaPrincipal && !tentouMudarQualidade) {
-                let botoesQualidade = Array.from(document.querySelectorAll('a, button, .aba, .Aba, .tab, .player-tab, .item, .animeq-player__server, .dropdown-source'));
-                let btnFHD = botoesQualidade.find(btn => {
-                    let txt = (btn.textContent || '').toUpperCase();
-                    let name = (btn.getAttribute('data-player-name') || '').toUpperCase();
-                    let source = (btn.getAttribute('data-source-name') || '').toUpperCase();
-                    return txt.includes('FHD') || txt.includes('FULL HD') || txt.includes('FULLHD') || txt.includes('1080') || name.includes('FULLHD') || source.includes('FHD');
-                });
-                if (btnFHD) {
-                    tentouMudarQualidade = true;
-                    let classes = (btnFHD.className || '').toLowerCase();
-                    let ehLinkDeVerdade = btnFHD.tagName === 'A' && btnFHD.getAttribute('href') &&
-                        !/^(#|javascript:)/i.test(btnFHD.getAttribute('href')) &&
-                        btnFHD.href !== window.location.href;
-                    if (!ehLinkDeVerdade && !classes.includes('selected') && !classes.includes('active') && !classes.includes('ativo') && !classes.includes('selecionado')) {
-                        btnFHD.click();
-                    }
-                }
+            if (autoPlay && !estadoAutoFHDVerificando()) {
+                try { executarAutoClickerDePlayers(); } catch (e) {}
             }
+
+            atualizarAutoFHD();
 
             try {
                 document.querySelectorAll('video').forEach(v => {
@@ -2114,20 +2529,108 @@
 
     function alternarModoExpandirPeloScript(video) {
         if (!video) return;
+        if (expansaoTeatroPendente) {
+            solicitarModoTeatro(video, false);
+            return;
+        }
         if (teatroAtivoNoVideo) desativarModoTeatro(video);
-        else ativarModoTeatro(video);
+        else solicitarModoTeatro(video, true);
+    }
+
+    function solicitarModoTeatro(video, ligar) {
+        if (!ligar) {
+            clearTimeout(timerSolicitacaoTeatroAutoFHD);
+            timerSolicitacaoTeatroAutoFHD = null;
+            const solicitacaoCancelada = solicitacaoTeatroAutoFHD;
+            expansaoTeatroPendente = false;
+            solicitacaoTeatroAutoFHD = null;
+            if (ehJanelaPrincipal && solicitacaoCancelada &&
+                solicitacaoCancelada.origem === 'iframe') {
+                executarSolicitacaoTeatroAutoFHD({
+                    ...solicitacaoCancelada,
+                    ligar: false
+                }, null, false);
+            }
+            if (window !== window.top && autoFHD) {
+                try {
+                    window.parent.postMessage({
+                        app: 'ANIME_V44',
+                        acao: 'TEATRO_SOLICITAR',
+                        ligar: false,
+                        id: ++sequenciaSolicitacaoTeatro,
+                        epoca
+                    }, '*');
+                } catch (e) {}
+            }
+            desativarModoTeatro(video || videoAtivo);
+            return;
+        }
+
+        const id = ++sequenciaSolicitacaoTeatro;
+        if (window !== window.top && autoFHD) {
+            clearTimeout(timerSolicitacaoTeatroAutoFHD);
+            expansaoTeatroPendente = true;
+            try {
+                window.parent.postMessage({
+                    app: 'ANIME_V44',
+                    acao: 'TEATRO_SOLICITAR',
+                    ligar: true,
+                    id,
+                    epoca
+                }, '*');
+            } catch (e) {
+                expansaoTeatroPendente = false;
+                if (video && video.isConnected) ativarModoTeatro(video);
+                return;
+            }
+            const epocaDaSolicitacao = epoca;
+            timerSolicitacaoTeatroAutoFHD = setTimeout(() => {
+                if (!expansaoTeatroPendente || id !== sequenciaSolicitacaoTeatro ||
+                    epocaDaSolicitacao !== epoca) return;
+                timerSolicitacaoTeatroAutoFHD = null;
+                expansaoTeatroPendente = false;
+                const videoAtual = obterVideoAtualParaTeatro(null, false);
+                if (videoAtual) ativarModoTeatro(videoAtual);
+            }, 500);
+            return;
+        }
+
+        if (autoFHDAguardandoTeatro()) {
+            expansaoTeatroPendente = true;
+            solicitacaoTeatroAutoFHD = {
+                origem: 'local',
+                ligar: true,
+                epoca,
+                id,
+                tentativaId: tentativaAutoFHD ? tentativaAutoFHD.id : null
+            };
+            return;
+        }
+
+        const videoAtual = video && video.isConnected
+            ? video
+            : obterVideoAtualParaTeatro(null, false);
+        if (videoAtual && videoAtual.isConnected) ativarModoTeatro(videoAtual);
     }
 
     function alternarModoTeatro() {
+        if (expansaoTeatroPendente) {
+            solicitarModoTeatro(videoAtivo, false);
+            return;
+        }
         if (!videoAtivo) return;
         alternarModoExpandirPeloScript(videoAtivo);
     }
 
     function definirModoTeatro(ligar) {
         const ativo = !!(teatroAtivoNoVideo || document.body.classList.contains('au-teatro-ativo'));
+        if (!ligar && expansaoTeatroPendente) {
+            solicitarModoTeatro(videoAtivo, false);
+            return;
+        }
         if (videoAtivo) {
-            if (ligar && !ativo) ativarModoTeatro(videoAtivo);
-            else if (!ligar && ativo) desativarModoTeatro(videoAtivo);
+            if (ligar && !ativo) solicitarModoTeatro(videoAtivo, true);
+            else if (!ligar && (ativo || expansaoTeatroPendente)) solicitarModoTeatro(videoAtivo, false);
             return;
         }
         if (window !== window.top) {
@@ -2163,7 +2666,7 @@
         if (autoTeatro) {
             if (!teatroTentado) {
                 teatroTentado = true;
-                ativarModoTeatro(video);
+                solicitarModoTeatro(video, true);
             }
         } else {
             ativarTelaCheiaNoVideo(video);
@@ -2242,42 +2745,46 @@
 
     function resetarInatividade(propagar = true) {
         const estavaOcioso = document.body.classList.contains('au-idle');
+        if (fabTeatro) fabTeatro.classList.remove('au-fab-inativo');
         document.body.classList.remove('au-idle');
         if (estavaOcioso) redimensionarPlayerExpandido(false);
         if (propagar && estavaOcioso) sincronizarInatividadeEntreFrames(false, true);
         else if (propagar && document.body.classList.contains('au-teatro-ativo')) sincronizarInatividadeEntreFrames(false);
         clearTimeout(timerInatividade);
-        if (teatroAtivoNoVideo || document.body.classList.contains('au-teatro-ativo') || document.body.classList.contains('au-menu-flutuante-aberto')) {
+        const controlarPainel = teatroAtivoNoVideo ||
+            document.body.classList.contains('au-teatro-ativo') ||
+            document.body.classList.contains('au-menu-flutuante-aberto');
+        if (fabTeatro || controlarPainel) {
             timerInatividade = setTimeout(() => {
-                document.body.classList.add('au-idle');
-                document.body.classList.remove('au-menu-flutuante-aberto');
-                atualizarVisualFabExpandido();
-                redimensionarPlayerExpandido(true);
-                sincronizarInatividadeEntreFrames(true);
+                if (fabTeatro) fabTeatro.classList.add('au-fab-inativo');
+                if (controlarPainel) {
+                    document.body.classList.add('au-idle');
+                    document.body.classList.remove('au-menu-flutuante-aberto');
+                    atualizarVisualFabExpandido();
+                    redimensionarPlayerExpandido(true);
+                    sincronizarInatividadeEntreFrames(true);
+                }
             }, 3000);
         }
     }
-    function fecharMenuFlutuante(devolverFoco = true) {
+    function fecharMenuFlutuante() {
         if (!document.body.classList.contains('au-menu-flutuante-aberto')) return false;
         document.body.classList.remove('au-menu-flutuante-aberto');
         atualizarVisualFabExpandido();
-        if (devolverFoco && document.activeElement !== fabTeatro) {
+        if (fabTeatro && document.activeElement !== fabTeatro) {
             ignorarProximoFocoFab = true;
             try { fabTeatro.focus({ preventScroll: true }); } catch (err) { fabTeatro.focus(); }
         }
         resetarInatividade();
         return true;
     }
-    function lidarComEscapeMenuFlutuante(e) {
-        if (!e || !eventoAcionaAtalho(e, lerAtalhosPersonalizados().closeMenu) || !document.body.classList.contains('au-menu-flutuante-aberto')) return;
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        fecharMenuFlutuante();
-    }
     let ignorarProximoFocoFab = false;
     document.addEventListener('focusin', e => {
         if (e.target === fabTeatro) {
-            if (ignorarProximoFocoFab) ignorarProximoFocoFab = false;
+            if (ignorarProximoFocoFab) {
+                ignorarProximoFocoFab = false;
+                resetarInatividade();
+            }
             else abrirMenuFlutuante();
             return;
         }
@@ -2292,7 +2799,6 @@
         if (saiuDoFabOuMenu && !continuouNoFabOuMenu) resetarInatividade();
     }, true);
     window.addEventListener('keydown', lidarComCtrlZDesfazerPulo, true);
-    window.addEventListener('keydown', lidarComEscapeMenuFlutuante, true);
     window.addEventListener('mousemove', resetarInatividade, true);
     window.addEventListener('pointermove', resetarInatividade, true);
     window.addEventListener('pointerdown', resetarInatividade, true);
@@ -2301,12 +2807,23 @@
     window.addEventListener('touchmove', resetarInatividade, { capture: true, passive: true });
     window.addEventListener('wheel', resetarInatividade, { capture: true, passive: true });
     window.addEventListener('keydown', resetarInatividade, true);
+    resetarInatividade(false);
 
     window.addEventListener('keydown', lidarComAtalhosDeTeclado, true);
 
     // ==========================================
     // 4.7 MENU FLUTUANTE — comandos do player fora do fluxo do site
     // ==========================================
+    function logoAOSvg(classe) {
+        return `<svg class="${classe}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 48" aria-hidden="true" focusable="false" role="presentation" style="pointer-events:none">
+            <circle cx="44" cy="24" r="16" fill="rgba(2,18,17,.72)" stroke="#047857" stroke-width="6"/>
+            <circle cx="44" cy="24" r="16" fill="none" stroke="#10dca2" stroke-width="3.2"/>
+            <path d="M39.5 16.5v15l12-7.5z" fill="#22f0bd" stroke="#99ffe4" stroke-width="1.4" stroke-linejoin="round"/>
+            <path d="M5 40 21.5 7.5 38 40M12.5 27.8h17" fill="none" stroke="#aebdc2" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M5 38.5 21.5 7.5 38 38.5M12.5 27h17" fill="none" stroke="#f4f8f8" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>`;
+    }
+
     function iconeSvg(nome) {
         const desenhos = {
             play: '<path d="m8 5 11 7-11 7z"/>',
@@ -2319,26 +2836,20 @@
             screen: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/>',
             info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/>',
             database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
-            close: '<path d="m6 6 12 12M18 6 6 18"/>',
         };
         return `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${desenhos[nome] || desenhos.info}</svg>`;
     }
 
-    function gerarHtmlBotoesBarra(comFechar) {
+    function gerarHtmlBotoesBarra() {
         const iconeAutoPlay = iconeSvg(autoPlay ? 'pause' : 'play');
-        const expandido = document.body.classList.contains('au-teatro-ativo');
-        const acaoExpandir = expandido ? 'Recolher' : 'Expandir';
-        const iconeExpandir = expandido ? 'collapse' : 'expand';
         let html = `
             <div class="au-btn-bar au-btn-bar-text" data-au-acao="atalho-proximo" title="Próximo episódio (tecla ${teclaProximoEp.toUpperCase()})" aria-label="Próximo episódio">${iconeSvg('next')}<span>Próx</span></div>
             <div class="au-btn-bar au-btn-bar-text" data-au-acao="atalho-intro" title="Pular intro (+${segundosPularIntro}s, tecla ${teclaPularIntro.toUpperCase()})" aria-label="Pular intro">${iconeSvg('skip')}<span>Intro</span></div>
-            <div class="au-btn-bar au-btn-bar-text" data-au-acao="atalho-teatro" data-au-expanded="${expandido}" title="${acaoExpandir} player (tecla T)" aria-label="${acaoExpandir} player">${iconeSvg(iconeExpandir)}<span>${acaoExpandir}</span></div>
             <div class="au-btn-bar ${autoPlay ? 'ativo' : ''}" data-au-toggle="autoplay" title="Auto Play: ${autoPlay ? 'Ligado' : 'Desligado'}" aria-label="Auto Play" aria-pressed="${autoPlay}">${iconeAutoPlay}</div>
             <div class="au-btn-bar ${autoNext ? 'ativo' : ''}" data-au-toggle="autonext" title="Auto Next: ${autoNext ? 'Ligado' : 'Desligado'}" aria-label="Auto Next" aria-pressed="${autoNext}">${iconeSvg('next')}</div>
             <div class="au-btn-bar ${autoAniSkip ? 'ativo' : ''}" data-au-toggle="aniskip" title="AniSkip: ${autoAniSkip ? 'Ligado' : 'Desligado'}" aria-label="AniSkip" aria-pressed="${autoAniSkip}">${iconeSvg('skip')}</div>
             <div class="au-btn-bar ${autoTeatro ? 'ativo' : ''}" data-au-toggle="teatro" title="Auto Expandir: ${autoTeatro ? 'Ligado' : 'Desligado'}" aria-label="Auto Expandir" aria-pressed="${autoTeatro}">${iconeSvg('expand')}</div>
         `;
-        if (comFechar) html += `<div class="au-btn-bar" data-au-acao="fechar" title="Recolher player" aria-label="Recolher player">${iconeSvg('close')}</div>`;
         const controles = `<span class="au-control-primary">${html}</span>`
             .replace(/<div class="au-btn-bar/g, '<button type="button" class="au-btn-bar')
             .replace(/<\/div>/g, '</button>');
@@ -2363,7 +2874,8 @@
             teatro:     () => {
                 autoTeatro = !autoTeatro;
                 GM_setValue('ativar_teatro', autoTeatro);
-                if (autoTeatro && videoAtivo) ativarModoTeatro(videoAtivo);
+                if (autoTeatro && videoAtivo) solicitarModoTeatro(videoAtivo, true);
+                else if (!autoTeatro && expansaoTeatroPendente) solicitarModoTeatro(videoAtivo, false);
             },
         };
         barraEl.querySelectorAll('[data-au-toggle]').forEach(btn => {
@@ -2375,18 +2887,9 @@
             const acao = btn.getAttribute('data-au-acao');
             if (acao === 'info') btn.onclick = () => { acionarInfo(); resetarInatividade(); };
             else if (acao === 'cache') btn.onclick = () => { acionarCacheOffline(); resetarInatividade(); };
-            else if (acao === 'fechar') btn.onclick = () => { desativarModoTeatro(videoAtivo); resetarInatividade(); };
             else if (acao === 'atalho-proximo') btn.onclick = () => { lidarComAtalhosDeTeclado({ key: teclaProximoEp, target: btn, manual: true, manualAction: 'next' }); resetarInatividade(); };
             else if (acao === 'atalho-intro') btn.onclick = () => { lidarComAtalhosDeTeclado({ key: teclaPularIntro, target: btn, manual: true, manualAction: 'intro' }); resetarInatividade(); };
             else if (acao === 'atalho-vinheta') btn.onclick = () => { lidarComAtalhosDeTeclado({ key: teclaPularVinheta, target: btn, manual: true, manualAction: 'outro' }); resetarInatividade(); };
-            else if (acao === 'atalho-teatro') btn.onclick = () => {
-                if (document.body.classList.contains('au-teatro-ativo') && document.body.classList.contains('au-menu-flutuante-aberto')) {
-                    fecharMenuFlutuante();
-                } else {
-                    lidarComAtalhosDeTeclado({ key: 't', target: btn, manual: true, manualAction: 'theater' });
-                }
-                resetarInatividade();
-            };
         });
     }
 
@@ -2581,6 +3084,9 @@
 
     function tentarReproduzirVideoAutomaticamente(video, ignorarEspera) {
         if (!autoPlay || !video || jaAvancou) return;
+        if (estadoAutoFHDVerificando() && tentativaAutoFHD &&
+            tentativaAutoFHD.videosAnteriores.has(video) &&
+            tentativaAutoFHD.fontesVideosAnteriores.get(video) === (video.currentSrc || video.src || '')) return;
         if (video.ended || !video.paused) return;
         if (!videoEhElegivelParaAutoplay(video) || !videoPossuiFonteDeMidia(video)) return;
 
@@ -3217,8 +3723,16 @@
     }
 
     async function buscarTemposAniSkip() {
+        if (!autoAniSkip || aniskipBuscaEmAndamento || Date.now() < proximaBuscaAniSkipEm) return;
+        aniskipBuscaEmAndamento = true;
+        aniskipBuscado = true;
+        const sequenciaAtual = ++sequenciaBuscaAniSkip;
+        const epocaDaBusca = epoca;
+        const urlDaBusca = window.location.href;
         let nomeParaAviso = 'Desconhecido';
         let epParaAviso = '?';
+        let repetirBusca = false;
+        let aguardandoMetadados = false;
         try {
             const { nomeLimpo, episodio } = extrairInfoDoEpisodioParaAniSkip();
             nomeParaAviso = nomeLimpo || 'Desconhecido';
@@ -3238,28 +3752,33 @@
                 if (!nomeLimpo || !episodio) {
                     atualizarStatusAniSkip(nomeParaAviso, epParaAviso, '⚠️ Falha ao ler Título/EP');
                     adiarBuscaAniSkipAteTituloCarregar();
+                    repetirBusca = true;
+                    aguardandoMetadados = true;
                     return;
                 }
 
                 const chaveCache = 'aniskip_malid_' + nomeLimpo.toLowerCase();
                 const malIdEmCache = GM_getValue(chaveCache, null);
 
-                if (malIdEmCache) {
-                    malId = malIdEmCache;
+                if (aniskipMalIdValido(malIdEmCache)) {
+                    malId = Number(malIdEmCache);
                     origemMalId = 'cache local';
                 } else {
                     atualizarStatusAniSkip(nomeParaAviso, epParaAviso, 'Consultando cache offline (MAL ID)...');
                     const resultadoOffline = await buscarMalIdOffline(nomeLimpo);
 
-                    if (resultadoOffline) {
-                        malId = resultadoOffline.malId;
+                    if (resultadoOffline && aniskipMalIdValido(resultadoOffline.malId)) {
+                        malId = Number(resultadoOffline.malId);
                         origemMalId = resultadoOffline.origem;
                         GM_setValue(chaveCache, malId);
                     } else {
                         atualizarStatusAniSkip(nomeParaAviso, epParaAviso, 'Não achado offline, tentando AniList...');
                         try {
                             const resultadoAniList = await buscarMalIdViaAniList(nomeLimpo);
-                            malId = resultadoAniList.malId;
+                            if (!resultadoAniList || !aniskipMalIdValido(resultadoAniList.malId)) {
+                                throw new Error('AniList retornou um MAL ID inválido');
+                            }
+                            malId = Number(resultadoAniList.malId);
                             origemMalId = resultadoAniList.origem;
                             GM_setValue(chaveCache, malId);
                             const chaveOffline = normalizarTituloParaBusca(nomeLimpo);
@@ -3271,7 +3790,8 @@
                                 atualizarVisibilidadeBotaoInfo();
                             }
                         } catch (e) {
-                            atualizarStatusAniSkip(nomeParaAviso, epParaAviso, '❌ Não achado (cache offline + AniList)');
+                            atualizarStatusAniSkip(nomeParaAviso, epParaAviso, `⚠️ Erro ao resolver MAL ID: ${e.message || 'AniList indisponível'}`);
+                            repetirBusca = true;
                             return;
                         }
                     }
@@ -3283,6 +3803,14 @@
             if (!episodio) {
                 atualizarStatusAniSkip(nomeParaAviso, epParaAviso, '⚠️ EP não identificado');
                 adiarBuscaAniSkipAteTituloCarregar();
+                repetirBusca = true;
+                aguardandoMetadados = true;
+                return;
+            }
+
+            if (!aniskipMalIdValido(malId)) {
+                atualizarStatusAniSkip(nomeParaAviso, epParaAviso, '⚠️ MAL ID inválido; nova tentativa agendada');
+                repetirBusca = true;
                 return;
             }
 
@@ -3295,27 +3823,66 @@
             const urlAniSkip = 'https://api.aniskip.com/v2/skip-times/' + malId + '/' + episodio + '?' + parametrosAniSkip.toString();
             const dadosAniSkip = await requisitarJsonAniSkip(urlAniSkip);
 
-            if (dadosAniSkip && dadosAniSkip.found && Array.isArray(dadosAniSkip.results) && dadosAniSkip.results.length) {
-                cacheAniSkip = dadosAniSkip.results;
-                atualizarStatusAniSkip(nomeParaAviso, epParaAviso, `Tempos encontrados! (${origemMalId || 'automático'})`, cacheAniSkip);
-
-                transmitirDadosAniSkipParaFrames();
-                aplicarPuloAniSkipSeJaEstiverNoTrecho();
-            } else {
+            if (!aniskipBuscaAindaAtual(sequenciaAtual, epocaDaBusca, urlDaBusca)) return;
+            if (dadosAniSkip && dadosAniSkip.found === true) {
+                if (!Array.isArray(dadosAniSkip.results)) {
+                    atualizarStatusAniSkip(nomeParaAviso, epParaAviso, '⚠️ Resposta AniSkip inválida');
+                    repetirBusca = true;
+                    return;
+                }
+                if (dadosAniSkip.results.length) {
+                    cacheAniSkip = normalizarResultadosAniSkip(dadosAniSkip.results);
+                    if (!cacheAniSkip.length) {
+                        atualizarStatusAniSkip(nomeParaAviso, epParaAviso, '⚠️ Resposta AniSkip sem intervalos válidos');
+                        repetirBusca = true;
+                        return;
+                    }
+                    tentativasLeituraAniSkip = 0;
+                    atualizarStatusAniSkip(nomeParaAviso, epParaAviso, `Tempos encontrados! (${origemMalId || 'automático'})`, cacheAniSkip);
+                    transmitirDadosAniSkipParaFrames();
+                    aplicarPuloAniSkipSeJaEstiverNoTrecho();
+                } else {
+                    cacheAniSkip = [];
+                    atualizarStatusAniSkip(nomeParaAviso, epParaAviso, '❌ Sem tempos para este EP');
+                }
+            } else if (dadosAniSkip && dadosAniSkip.found === false) {
+                cacheAniSkip = [];
                 atualizarStatusAniSkip(nomeParaAviso, epParaAviso, '❌ Sem tempos para este EP');
+            } else {
+                atualizarStatusAniSkip(nomeParaAviso, epParaAviso, '⚠️ Resposta AniSkip inválida');
+                repetirBusca = true;
             }
         } catch (e) {
             let msgErro = e.message || 'Erro de API ou Rede';
             if (msgErro.includes('HTTP 429')) {
                 msgErro = 'Limite de pedidos (Muitos pedidos)';
                 atualizarStatusAniSkip(nomeParaAviso, epParaAviso, '⚠️ Erro: ' + msgErro);
+                repetirBusca = true;
                 return;
             }
             if (msgErro.includes('HTTP 404')) {
+                cacheAniSkip = [];
                 atualizarStatusAniSkip(nomeParaAviso, epParaAviso, '⚪ Tempos não mapeados pela comunidade (404)');
                 return;
             }
             atualizarStatusAniSkip(nomeParaAviso, epParaAviso, '⚠️ Erro: ' + msgErro);
+            repetirBusca = true;
+        } finally {
+            if (sequenciaAtual === sequenciaBuscaAniSkip) {
+                aniskipBuscaEmAndamento = false;
+                if (aniskipBuscaAindaAtual(sequenciaAtual, epocaDaBusca, urlDaBusca)) {
+                    if (!autoAniSkip) {
+                        aniskipBuscado = false;
+                        proximaBuscaAniSkipEm = 0;
+                    } else if (repetirBusca) {
+                        agendarRetryAniSkip(aguardandoMetadados);
+                    } else {
+                        aniskipBuscado = true;
+                        tentativasFalhaAniSkip = 0;
+                        proximaBuscaAniSkipEm = 0;
+                    }
+                }
+            }
         }
     }
 
@@ -3518,16 +4085,23 @@
             appearance: none !important; -webkit-appearance: none !important;
             display: flex !important; justify-content: center !important; align-items: center !important;
             z-index: 99999999 !important; box-shadow: 0 8px 24px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.25) !important;
-            transition: opacity 0.4s ease, transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease !important;
+            transition: opacity 250ms ease, transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease !important;
             touch-action: none !important; user-select: none !important; -webkit-user-select: none !important;
         }
         #au-fab-teatro svg { width: 23px !important; height: 23px !important; }
+        #au-fab-teatro .au-logo-ao-fab {
+            display: block !important; width: 38px !important; height: 29px !important;
+            flex: 0 0 auto !important; pointer-events: none !important;
+        }
         #au-fab-teatro[data-au-expanded="true"] { background: linear-gradient(145deg, #0f766e, #115e59) !important; box-shadow: 0 8px 24px rgba(0,0,0,0.42), 0 0 0 3px rgba(52,211,153,.2), inset 0 1px 0 rgba(255,255,255,0.25) !important; }
         #au-fab-teatro.au-fab-arrastando, #au-fab-teatro.au-fab-arrastando:hover { transition: none !important; transform: none !important; cursor: grabbing !important; }
         #au-fab-teatro:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 28px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.3) !important; }
         #au-fab-teatro:active { transform: scale(0.94) !important; }
         #au-fab-teatro:focus-visible, .au-btn-bar:focus-visible { outline: 2px solid #a7f3d0 !important; outline-offset: 2px !important; }
-        body.au-idle #au-fab-teatro { opacity: 0 !important; pointer-events: none !important; }
+        #au-fab-teatro.au-fab-inativo { opacity: 0.1 !important; }
+        #au-fab-teatro.au-fab-inativo:hover,
+        #au-fab-teatro.au-fab-inativo:focus,
+        #au-fab-teatro.au-fab-inativo:focus-visible { opacity: 1 !important; }
 
         #au-skip-toast {
             position: fixed !important; left: 50% !important; bottom: 92px !important; z-index: 2147483647 !important;
@@ -3578,6 +4152,15 @@
 
         .au-control-primary {
             display: flex !important; align-items: center !important; gap: 8px !important;
+        }
+        .au-menu-brand {
+            display: inline-flex !important; align-items: center !important; justify-content: center !important;
+            flex: 0 0 24px !important; width: 24px !important; height: 24px !important;
+            margin-right: 2px !important; pointer-events: none !important;
+        }
+        .au-logo-ao-menu {
+            display: block !important; width: 24px !important; height: 19px !important;
+            flex: 0 0 auto !important; pointer-events: none !important;
         }
         .au-status-chip {
             display: flex !important; align-items: center !important; gap: 8px !important;
@@ -3665,6 +4248,8 @@
                 align-items: center !important; justify-content: space-between !important; gap: 3px !important;
                 padding: 5px 8px !important; overflow: visible !important;
             }
+            .au-menu-brand { flex-basis: 20px !important; width: 20px !important; height: 20px !important; margin-right: 0 !important; }
+            .au-logo-ao-menu { width: 20px !important; height: 16px !important; }
             .au-status-chip { max-width: 29vw !important; min-width: 0 !important; justify-content: center !important; border-right: 0 !important; padding: 0 3px !important; box-sizing: border-box !important; }
             .au-status-label, .au-status-aniskip, .au-status-message { display: none !important; }
             .au-status-time { overflow: hidden !important; text-overflow: ellipsis !important; }
@@ -3672,6 +4257,8 @@
             .au-control-primary .au-btn-bar-text { padding-left: 6px !important; padding-right: 6px !important; font-size: 11px !important; }
         }
         @media (max-width: 380px) {
+            .au-menu-brand { flex-basis: 18px !important; width: 18px !important; height: 18px !important; }
+            .au-logo-ao-menu { width: 18px !important; height: 15px !important; }
             .au-control-primary .au-btn-bar-text { min-width: 40px !important; width: 40px !important; padding: 0 !important; }
             .au-control-primary .au-btn-bar-text span { display: none !important; }
         }
@@ -3757,9 +4344,10 @@
                 gap: 5px !important;
             }
         }
-        /* O botão fica visualmente oculto após três segundos sem atividade. Ele mantém
-           uma zona de toque no lugar para reativar os controles em players dentro de iframe. */
-        body.au-teatro-ativo.au-idle #au-fab-teatro { opacity: 0 !important; pointer-events: auto !important; }
+        /* O botão permanece visível no modo teatro para reativar controles em players dentro de iframe. */
+        body.au-teatro-ativo.au-idle #au-fab-teatro {
+            visibility: visible !important; pointer-events: auto !important;
+        }
         @media (max-width: 600px) and (orientation: portrait) {
             body.au-teatro-ativo .au-modo-teatro {
                 height: 56.25vw !important; max-height: 56.25vw !important;
@@ -3850,6 +4438,24 @@
             #au-info-titulo { font-size: 17px !important; }
             #au-info-sinopse { font-size: 13px !important; }
         }
+
+        #au-menu-fechar {
+            position: fixed !important; top: 8px !important; left: 8px !important; z-index: 2147483647 !important;
+            display: none !important; align-items: center !important; justify-content: center !important;
+            width: 18px !important; height: 18px !important; min-width: 18px !important; min-height: 18px !important;
+            padding: 0 !important; border: 1px solid rgba(203,213,225,.3) !important;
+            border-radius: 50% !important; background: rgba(15,23,42,.82) !important;
+            color: #cbd5e1 !important; font: 500 12px/1 system-ui, sans-serif !important;
+            cursor: pointer !important; pointer-events: auto !important;
+            box-shadow: 0 1px 4px rgba(0,0,0,.3) !important;
+            transition: background .16s ease, border-color .16s ease, color .16s ease !important;
+        }
+        body.au-menu-flutuante-aberto #au-menu-fechar { display: inline-flex !important; }
+        #au-menu-fechar:hover {
+            background: rgba(6,78,59,.9) !important; border-color: rgba(52,211,153,.65) !important;
+            color: #a7f3d0 !important;
+        }
+        #au-menu-fechar:focus-visible { outline: 2px solid #a7f3d0 !important; outline-offset: 2px !important; }
     `;
 
     function injetarCSSNoDocumento(doc) {
@@ -4109,13 +4715,22 @@
         fullscreenTentado = false;
         teatroTentado = false;
         teatroAtivoNoVideo = false;
+        expansaoTeatroPendente = false;
+        solicitacaoTeatroAutoFHD = null;
+        clearTimeout(timerSolicitacaoTeatroAutoFHD);
+        timerSolicitacaoTeatroAutoFHD = null;
         tentouMudarQualidade = false;
+        estadoAutoFHD = 'espera';
+        tentativaAutoFHD = null;
+        estabilidadeListaServidores = { assinatura: '', desde: 0 };
         fallbackTentativas = 0;
         watchdogTempo = 0;
         indiceServidorFallback = -1;
         armado = false;
         videoAtivo = null;
         ultimoAvisoTempo = 0;
+        sequenciaBuscaAniSkip++;
+        aniskipBuscaEmAndamento = false;
         cacheAniSkip = null;
         framesAguardandoDadosAniSkip.clear();
         clearTimeout(temporizadorSolicitarDadosAniSkip);
@@ -4124,6 +4739,7 @@
         tentativasSolicitarDadosAniSkip = 0;
         buscaLocalAniSkipNoPlayer = false;
         aniskipBuscado = false;
+        tentativasFalhaAniSkip = 0;
         tentativasLeituraAniSkip = 0;
         proximaBuscaAniSkipEm = 0;
         metadadosAnimeAtual = null;
@@ -4203,6 +4819,40 @@
         if (['loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'canplaythrough', 'playing'].includes(e.type)) {
             aplicarQualidadePreferidaNoVideo(video);
         }
+        if (estadoAutoFHDVerificando()) {
+            if (tentativaAutoFHD && tentativaAutoFHD.videosAnteriores.has(video)) {
+                const fonteAtual = video.currentSrc || video.src || '';
+                const fonteObservada = tentativaAutoFHD.fontesVideosAposTroca.has(video)
+                    ? tentativaAutoFHD.fontesVideosAposTroca.get(video)
+                    : tentativaAutoFHD.fontesVideosAnteriores.get(video);
+                if (fonteAtual && fonteObservada !== fonteAtual) {
+                    const estado = obterOuCriarEstadoDoVideo(video);
+                    estado.tPlaying = 0;
+                    estado.estavel = false;
+                    estado.tentativas = 0;
+                    estado.ultima = 0;
+                    estado.falhasPlay = 0;
+                    estado.playPendente = false;
+                    estado.playId++;
+                    estado.src = fonteAtual;
+                    tentativaAutoFHD.fontesVideosAposTroca.set(video, fonteAtual);
+                    if (tentativaAutoFHD.mudoAnteriorDosVideos.has(video)) {
+                        try { video.muted = tentativaAutoFHD.mudoAnteriorDosVideos.get(video); } catch (e) {}
+                    }
+                }
+                if (e.type === 'loadstart') {
+                    adaptadoresDeVideo.delete(video);
+                    const estado = obterOuCriarEstadoDoVideo(video);
+                    estado.src = video.src || fonteAtual || estado.src;
+                }
+            }
+            if (e.type === 'playing') {
+                const estado = obterOuCriarEstadoDoVideo(video);
+                if (!estado.tPlaying) estado.tPlaying = Date.now();
+            }
+            return;
+        }
+        if (autoFHDControlandoSelecao() && e.type === 'error') return;
 
         switch (e.type) {
             case 'loadstart': {
@@ -4210,7 +4860,7 @@
                 const s = obterOuCriarEstadoDoVideo(video);
                 let src = '';
                 try { src = video.currentSrc || video.src || ''; } catch (err) {}
-                if (s.src && src && s.src !== src) {
+                if (s.src && src && s.src !== src && !estadoAutoFHDVerificando()) {
                     reiniciarEstadoParaNovoEpisodio('fonte do vídeo mudou');
                     obterOuCriarEstadoDoVideo(video);
                 }
@@ -4302,7 +4952,7 @@
     }
 
     function lidarComAtualizacaoDeTempoDoVideo(video) {
-        if (jaAvancou) return;
+        if (jaAvancou || estadoAutoFHDVerificando()) return;
 
         const atual = obterTempoAtualDoVideo(video);
         const total = obterDuracaoDoVideo(video);
@@ -4431,7 +5081,6 @@
         buscarERecusarPopupDeContinuarAssistindo(docs);
 
         if (ehJanelaPrincipal && autoAniSkip && !aniskipBuscado && Date.now() >= proximaBuscaAniSkipEm) {
-            aniskipBuscado = true;
             buscarTemposAniSkip();
         }
 
@@ -4474,17 +5123,19 @@
         if (jaAvancou) return;
 
         if (ehJanelaPrincipal) {
-            if (videoAtivo && (videoAtivo.currentTime > 0 || !videoAtivo.paused)) {
-                watchdogTempo = 0;
-            } else if (autoPlay) {
-                watchdogTempo++;
-            }
+            if (!autoFHDControlandoSelecao()) {
+                if (videoAtivo && (videoAtivo.currentTime > 0 || !videoAtivo.paused)) {
+                    watchdogTempo = 0;
+                } else if (autoPlay) {
+                    watchdogTempo++;
+                }
 
-            const limiteSemProgresso = hostCorrespondeADominio(hostAtual, 'animesdrive.cloud') || frameBloggerDoAnimesDrive ? 5 : 15;
-            if (watchdogTempo >= limiteSemProgresso && fallbackTentativas < 4) {
-                watchdogTempo = 0;
-                exibirMensagemBreveNoPainel(`⏳ Demora excessiva (${fallbackTentativas+1}/4). Testando outro...`);
-                tentarClicarProximoServidor();
+                const limiteSemProgresso = hostCorrespondeADominio(hostAtual, 'animesdrive.cloud') || frameBloggerDoAnimesDrive ? 5 : 15;
+                if (watchdogTempo >= limiteSemProgresso && fallbackTentativas < 4) {
+                    watchdogTempo = 0;
+                    exibirMensagemBreveNoPainel(`⏳ Demora excessiva (${fallbackTentativas+1}/4). Testando outro...`);
+                    tentarClicarProximoServidor();
+                }
             }
         }
 
@@ -4503,7 +5154,7 @@
                 tentarReproduzirVideoAutomaticamente(videoEncontrado);
             }
 
-            if (!videoEncontrado.paused) {
+            if (!estadoAutoFHDVerificando() && !videoEncontrado.paused) {
                 expandirVideoConformeHierarquia(videoEncontrado);
             }
 

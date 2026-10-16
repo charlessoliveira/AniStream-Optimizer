@@ -1,3 +1,12 @@
+AniStream Optimizer 1.3.0
+
+- Adiciona a identidade visual AO ao botão flutuante e ao menu usando SVG inline, sem imagens ou dependências externas.
+- Unifica o controle do player: clique simples no botão flutuante abre os comandos; clique duplo alterna o modo expandido.
+- Posiciona o botão X compacto fora do menu e ao lado do botão principal; ele fecha somente os comandos e acompanha o reposicionamento do botão.
+- Torna a seleção automática Full HD mais segura, aguardando estabilidade e validando a reprodução antes de concluir a troca.
+- Melhora a recuperação do AniSkip após falhas temporárias, valida os intervalos recebidos e ignora respostas atrasadas de episódios anteriores.
+- Adiciona testes automatizados para AniSkip, seleção Full HD, menu, botão flutuante e identidade visual.
+
 AniStream Optimizer 1.2.2
 
 - Melhora a acessibilidade e a operação por teclado do menu e do botão flutuante, incluindo foco, estados anunciados e reposicionamento.
