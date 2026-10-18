@@ -2,7 +2,7 @@
 
 Userscript para automatizar e personalizar a reprodução de episódios de anime. O código também está publicado no [Greasy Fork](https://greasyfork.org/pt-BR/scripts/597329-anistream-optimizer-autoplay-auto-next-spa-aniskip).
 
-Versão do repositório: **1.3.0**.
+Versão do repositório: **1.3.1**.
 
 ## Recursos
 
@@ -18,6 +18,10 @@ Versão do repositório: **1.3.0**.
 - Atalhos editáveis, aviso de pulo e opção para desfazer o pulo recente.
 - Suporte a páginas SPA e a players HTML5, JW Player e Plyr, incluindo players em iframe quando acessíveis.
 - Preferências por site e comandos de configuração no Tampermonkey.
+
+### 1.3.1
+
+Corrige AniSkip em players cross-origin carregados com atraso, incluindo AnimesROLL.
 
 ## Instalação
 
@@ -41,6 +45,8 @@ O arquivo instalável está na raiz. A cópia de desenvolvimento fica em `src/An
 npm run check
 npm test
 ```
+
+Mensagens entre frames ainda usam `postMessage` com destino `*` quando o player é cross-origin e sua origem de destino não pode ser lida com segurança. Os relays permanecem limitados à árvore de frames; dados do AniSkip exigem remetente `window.top` e origem compatível com o domínio autorizado, com exceção restrita para origem opaca.
 
 ## Licença
 

@@ -1,3 +1,7 @@
+AniStream Optimizer 1.3.1
+
+- Corrige AniSkip em players cross-origin carregados com atraso, incluindo AnimesROLL.
+
 AniStream Optimizer 1.3.0
 
 - Adiciona a identidade visual AO ao botão flutuante e ao menu usando SVG inline, sem imagens ou dependências externas.

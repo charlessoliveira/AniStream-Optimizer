@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AniStream Optimizer (Autoplay + Auto-Next + SPA + AniSkip)
 // @namespace    http://tampermonkey.net/
-// @version      1.3.0
+// @version      1.3.1
 // @description  Autoplay persistente, auto-next, suporte a SPA, recusa automática de retomada e pulo de abertura/encerramento via AniSkip.
 // @author       Você (com apoio do Claude e do Gemini)
 // @license      MIT
@@ -390,7 +390,7 @@
 
     let autoAniSkip = GM_getValue('ativar_aniskip', true);
     let cacheAniSkip = null;
-    const framesAguardandoDadosAniSkip = new Set();
+    const framesAguardandoDadosAniSkip = new Map();
     let aniskipBuscado = false;
     let aniskipBuscaEmAndamento = false;
     let sequenciaBuscaAniSkip = 0;
@@ -398,14 +398,85 @@
     let aniskipSolicitouDadosAoPai = false;
     let tentativasSolicitarDadosAniSkip = 0;
     let temporizadorSolicitarDadosAniSkip = null;
-    let buscaLocalAniSkipNoPlayer = false;
+    let temporizadorBuscaLocalAniSkip = null;
+    let sequenciaSolicitacaoDadosAniSkip = 0;
+    let tokenSolicitacaoDadosAniSkip = null;
+    let tokenDadosAniSkipRecebidos = null;
+    let urlSolicitacaoDadosAniSkip = '';
+    let epocaSolicitacaoDadosAniSkip = -1;
     let tentativasLeituraAniSkip = 0;
     let proximaBuscaAniSkipEm = 0;
+    let executarBuscaLocalAniSkip = null;
+    let buscaLocalAniSkipCallbackIndisponivel = false;
+    function cancelarBuscaLocalAniSkip() {
+        clearTimeout(temporizadorBuscaLocalAniSkip);
+        temporizadorBuscaLocalAniSkip = null;
+    }
+
+    function obterTokenSolicitacaoDadosAniSkip() {
+        const urlAtual = window.location.href;
+        if (!tokenSolicitacaoDadosAniSkip || urlSolicitacaoDadosAniSkip !== urlAtual ||
+            epocaSolicitacaoDadosAniSkip !== epoca) {
+            tokenSolicitacaoDadosAniSkip =
+                `${epoca}:${++sequenciaSolicitacaoDadosAniSkip}:${Date.now().toString(36)}`;
+            urlSolicitacaoDadosAniSkip = urlAtual;
+            epocaSolicitacaoDadosAniSkip = epoca;
+            tokenDadosAniSkipRecebidos = null;
+        }
+        return tokenSolicitacaoDadosAniSkip;
+    }
+
+    function tokenSolicitacaoDadosAniSkipAindaAtual(token) {
+        return !!token && token === tokenSolicitacaoDadosAniSkip &&
+            urlSolicitacaoDadosAniSkip === window.location.href &&
+            epocaSolicitacaoDadosAniSkip === epoca;
+    }
+
+    function agendarBuscaLocalAniSkip() {
+        if (ehJanelaPrincipal || !autoAniSkip || temporizadorBuscaLocalAniSkip !== null ||
+            aniskipBuscaEmAndamento || aniskipBuscado ||
+            buscaLocalAniSkipCallbackIndisponivel ||
+            (Array.isArray(cacheAniSkip) && cacheAniSkip.length)) return;
+
+        const epocaAgendada = epoca;
+        const urlAgendada = window.location.href;
+        const sequenciaAgendada = sequenciaBuscaAniSkip;
+        const tokenAgendado = obterTokenSolicitacaoDadosAniSkip();
+        let reagendouCallbackAusente = false;
+        const tentarBusca = () => {
+            temporizadorBuscaLocalAniSkip = null;
+            if (ehJanelaPrincipal || !autoAniSkip || aniskipBuscaEmAndamento || aniskipBuscado ||
+                epocaAgendada !== epoca || urlAgendada !== window.location.href ||
+                sequenciaAgendada !== sequenciaBuscaAniSkip ||
+                !tokenSolicitacaoDadosAniSkipAindaAtual(tokenAgendado) ||
+                (Array.isArray(cacheAniSkip) && cacheAniSkip.length)) return;
+            const esperaRestante = proximaBuscaAniSkipEm - Date.now();
+            if (esperaRestante > 0) {
+                temporizadorBuscaLocalAniSkip = setTimeout(tentarBusca, esperaRestante);
+                return;
+            }
+            if (typeof executarBuscaLocalAniSkip !== 'function') {
+                if (!reagendouCallbackAusente) {
+                    reagendouCallbackAusente = true;
+                    temporizadorBuscaLocalAniSkip = setTimeout(tentarBusca, 250);
+                    return;
+                }
+                buscaLocalAniSkipCallbackIndisponivel = true;
+                console.error('[AniStream] Busca AniSkip local indisponível neste frame; uma nova inicialização será necessária.');
+                return;
+            }
+            executarBuscaLocalAniSkip();
+        };
+        temporizadorBuscaLocalAniSkip = setTimeout(tentarBusca, 1500);
+    }
 
     function solicitarDadosAniSkipAoPai() {
         if (ehJanelaPrincipal || !autoAniSkip || aniskipSolicitouDadosAoPai || (Array.isArray(cacheAniSkip) && cacheAniSkip.length)) return;
+        const requestId = obterTokenSolicitacaoDadosAniSkip();
+        agendarBuscaLocalAniSkip();
         try {
-            window.top.postMessage({ app: 'ANIME_V44', acao: 'ANISKIP_SOLICITAR_DADOS' }, '*');
+            // O destino pode ser cross-origin; a resposta é validada pelo remetente e pela origem autorizada.
+            window.top.postMessage({ app: 'ANIME_V44', acao: 'ANISKIP_SOLICITAR_DADOS', requestId }, '*');
             aniskipSolicitouDadosAoPai = true;
             const atrasos = [300, 700, 1500, 3000, 5000, 8000];
             if (tentativasSolicitarDadosAniSkip < atrasos.length) {
@@ -417,20 +488,21 @@
                     tentativasSolicitarDadosAniSkip++;
                     solicitarDadosAniSkipAoPai();
                 }, atrasos[tentativasSolicitarDadosAniSkip]);
-            } else if (!buscaLocalAniSkipNoPlayer && hostCorrespondeADominio(hostAtual, 'anidrive.click')) {
-                // O Anroll pode não encaminhar a resposta AniSkip ao iframe do Anidrive.
-                // Após esgotar a sincronização com o pai, procura os tempos pelo título do player.
-                buscaLocalAniSkipNoPlayer = true;
-                buscarTemposAniSkip();
             }
         } catch (e) {}
     }
 
-    function enviarDadosAniSkipParaFrame(frameWindow, origem = '*') {
-        if (!frameWindow || !Array.isArray(cacheAniSkip) || !cacheAniSkip.length) return;
+    function enviarDadosAniSkipParaFrame(frameWindow, origem = '*', requestId) {
+        if (!frameWindow || !Array.isArray(cacheAniSkip) || !cacheAniSkip.length ||
+            typeof requestId !== 'string' || !requestId || requestId.length > 128) return;
         try {
             const destino = origem && origem !== 'null' ? origem : '*';
-            frameWindow.postMessage({ app: 'ANIME_V44', acao: 'ANISKIP_DADOS', dados: cacheAniSkip }, destino);
+            frameWindow.postMessage({
+                app: 'ANIME_V44',
+                acao: 'ANISKIP_DADOS',
+                requestId,
+                dados: cacheAniSkip
+            }, destino);
         } catch (e) {}
     }
 
@@ -472,13 +544,25 @@
             urlDaBusca === window.location.href;
     }
 
+    function mensagemAniSkipVemDoPaiAutorizado(evento) {
+        if (ehJanelaPrincipal || !evento || evento.source !== window.top) return false;
+
+        const hostOrigem = hostnameDeOrigemConfiavel(evento.origin);
+        if (!hostOrigem) {
+            // Origem opaca só é aceita quando a própria origem top também não pode ser identificada.
+            return evento.origin === 'null' &&
+                !hostnameDoSitePrincipalPorAncestorOrigins(window.location.ancestorOrigins);
+        }
+
+        const hostTopo = hostnameDoSitePrincipalPorAncestorOrigins(window.location.ancestorOrigins);
+        if (hostTopo && hostTopo !== hostOrigem) return false;
+        return resolverAtivacaoDoSite(hostOrigem, cfgSites).ativo;
+    }
+
     function transmitirDadosAniSkipParaFrames() {
         if (!ehJanelaPrincipal || !Array.isArray(cacheAniSkip) || !cacheAniSkip.length) return;
-        const destinos = new Set(framesAguardandoDadosAniSkip);
-        try {
-            document.querySelectorAll('iframe').forEach(frame => { if (frame.contentWindow) destinos.add(frame.contentWindow); });
-        } catch (e) {}
-        destinos.forEach(frameWindow => enviarDadosAniSkipParaFrame(frameWindow));
+        framesAguardandoDadosAniSkip.forEach((requestId, frameWindow) =>
+            enviarDadosAniSkipParaFrame(frameWindow, '*', requestId));
         framesAguardandoDadosAniSkip.clear();
     }
 
@@ -547,6 +631,8 @@
     // 2. INICIALIZAÇÃO CONFORME A POLÍTICA DE SITES
     // ==========================================
     function iniciarAniStreamNoFrameAutorizado() {
+    executarBuscaLocalAniSkip = () => buscarTemposAniSkip();
+    buscaLocalAniSkipCallbackIndisponivel = false;
     let uiStatus, uiTempo, uiAP, uiAniSkip;
     let fabTeatro = null;
     let abrirMenuFlutuante = () => false;
@@ -1106,10 +1192,12 @@
                     els.forEach(el => { el.style.display = 'block'; definirHtmlSanitizado(el, e.data.txt); });
                 }
                 else if (e.data.acao === 'ANISKIP_SOLICITAR_DADOS' && e.source) {
+                    const requestId = e.data.requestId;
+                    if (typeof requestId !== 'string' || !requestId || requestId.length > 128) return;
                     if (Array.isArray(cacheAniSkip) && cacheAniSkip.length) {
-                        enviarDadosAniSkipParaFrame(e.source, e.origin);
+                        enviarDadosAniSkipParaFrame(e.source, e.origin, requestId);
                     } else {
-                        framesAguardandoDadosAniSkip.add(e.source);
+                        framesAguardandoDadosAniSkip.set(e.source, requestId);
                     }
                 }
                 else if (e.data.acao === 'FALLBACK_SERVIDOR') tentarClicarProximoServidor();
@@ -1204,9 +1292,21 @@
                     });
                 }
             } else if (e.data.acao === 'ANISKIP_DADOS') {
+                if (!mensagemAniSkipVemDoPaiAutorizado(e)) return;
+                const requestId = e.data.requestId;
+                if (!tokenSolicitacaoDadosAniSkipAindaAtual(requestId) ||
+                    requestId === tokenDadosAniSkipRecebidos) return;
                 const temposRecebidos = normalizarResultadosAniSkip(e.data.dados);
                 if (temposRecebidos.length) {
+                    cancelarBuscaLocalAniSkip();
+                    if (aniskipBuscaEmAndamento) {
+                        sequenciaBuscaAniSkip++;
+                        aniskipBuscaEmAndamento = false;
+                    }
                     cacheAniSkip = temposRecebidos;
+                    tokenDadosAniSkipRecebidos = requestId;
+                    aniskipBuscado = true;
+                    proximaBuscaAniSkipEm = 0;
                     clearTimeout(temporizadorSolicitarDadosAniSkip);
                     temporizadorSolicitarDadosAniSkip = null;
                     aniskipSolicitouDadosAoPai = true;
@@ -2869,7 +2969,11 @@
         const alternadores = {
             autoplay:   () => { autoPlay = !autoPlay; GM_setValue('ativar_autoplay', autoPlay); },
             autonext:   () => { autoNext = !autoNext; GM_setValue('ativar_autonext', autoNext); },
-            aniskip:    () => { autoAniSkip = !autoAniSkip; GM_setValue('ativar_aniskip', autoAniSkip); },
+            aniskip:    () => {
+                autoAniSkip = !autoAniSkip;
+                GM_setValue('ativar_aniskip', autoAniSkip);
+                if (!autoAniSkip) cancelarBuscaLocalAniSkip();
+            },
             fullscreen: () => { autoFullscreen = !autoFullscreen; GM_setValue('ativar_fullscreen', autoFullscreen); },
             teatro:     () => {
                 autoTeatro = !autoTeatro;
@@ -3766,6 +3870,7 @@
                 } else {
                     atualizarStatusAniSkip(nomeParaAviso, epParaAviso, 'Consultando cache offline (MAL ID)...');
                     const resultadoOffline = await buscarMalIdOffline(nomeLimpo);
+                    if (!aniskipBuscaAindaAtual(sequenciaAtual, epocaDaBusca, urlDaBusca)) return;
 
                     if (resultadoOffline && aniskipMalIdValido(resultadoOffline.malId)) {
                         malId = Number(resultadoOffline.malId);
@@ -3775,6 +3880,7 @@
                         atualizarStatusAniSkip(nomeParaAviso, epParaAviso, 'Não achado offline, tentando AniList...');
                         try {
                             const resultadoAniList = await buscarMalIdViaAniList(nomeLimpo);
+                            if (!aniskipBuscaAindaAtual(sequenciaAtual, epocaDaBusca, urlDaBusca)) return;
                             if (!resultadoAniList || !aniskipMalIdValido(resultadoAniList.malId)) {
                                 throw new Error('AniList retornou um MAL ID inválido');
                             }
@@ -3790,6 +3896,7 @@
                                 atualizarVisibilidadeBotaoInfo();
                             }
                         } catch (e) {
+                            if (!aniskipBuscaAindaAtual(sequenciaAtual, epocaDaBusca, urlDaBusca)) return;
                             atualizarStatusAniSkip(nomeParaAviso, epParaAviso, `⚠️ Erro ao resolver MAL ID: ${e.message || 'AniList indisponível'}`);
                             repetirBusca = true;
                             return;
@@ -3853,6 +3960,7 @@
                 repetirBusca = true;
             }
         } catch (e) {
+            if (!aniskipBuscaAindaAtual(sequenciaAtual, epocaDaBusca, urlDaBusca)) return;
             let msgErro = e.message || 'Erro de API ou Rede';
             if (msgErro.includes('HTTP 429')) {
                 msgErro = 'Limite de pedidos (Muitos pedidos)';
@@ -4735,9 +4843,10 @@
         framesAguardandoDadosAniSkip.clear();
         clearTimeout(temporizadorSolicitarDadosAniSkip);
         temporizadorSolicitarDadosAniSkip = null;
+        cancelarBuscaLocalAniSkip();
+        buscaLocalAniSkipCallbackIndisponivel = false;
         aniskipSolicitouDadosAoPai = false;
         tentativasSolicitarDadosAniSkip = 0;
-        buscaLocalAniSkipNoPlayer = false;
         aniskipBuscado = false;
         tentativasFalhaAniSkip = 0;
         tentativasLeituraAniSkip = 0;
@@ -4899,12 +5008,18 @@
     function solicitarPuloAniSkipComConfirmacao(video, item, fim, mensagem) {
         if (!video || item.jaPulou || item.puloPendente || video.readyState < 1) return false;
 
+        const duracao = Number(video.duration);
+        const destino = Number.isFinite(duracao) && duracao > 0
+            ? Math.min(fim, Math.max(0, duracao - 0.25))
+            : fim;
+        if (!Number.isFinite(destino) || destino < 0) return false;
+
         try {
             const seekable = video.seekable;
             if (seekable && seekable.length) {
                 let destinoDisponivel = false;
                 for (let i = 0; i < seekable.length; i++) {
-                    if (fim >= seekable.start(i) - 0.25 && fim <= seekable.end(i) + 0.25) {
+                    if (destino >= seekable.start(i) - 0.25 && destino <= seekable.end(i) + 0.25) {
                         destinoDisponivel = true;
                         break;
                     }
@@ -4925,10 +5040,10 @@
             video.removeEventListener('seeked', aoBuscar);
             item.puloPendente = null;
             if (!confirmar || epoca !== epocaDoPedido || !video.isConnected) return;
-            if (!Number.isFinite(obterTempoAtualDoVideo(video)) || Math.abs(obterTempoAtualDoVideo(video) - fim) > 1.5 || video.seeking) return;
+            if (!Number.isFinite(obterTempoAtualDoVideo(video)) || Math.abs(obterTempoAtualDoVideo(video) - destino) > 1.5 || video.seeking) return;
             item.jaPulou = true;
-            const dadosDesfazer = Number.isFinite(posicaoAnterior) && fim - posicaoAnterior > 1.5
-                ? { video, posicaoAnterior, posicaoPulada: fim }
+            const dadosDesfazer = Number.isFinite(posicaoAnterior) && destino - posicaoAnterior > 1.5
+                ? { video, posicaoAnterior, posicaoPulada: destino }
                 : null;
             exibirMensagemBreveNoPainel(mensagem, dadosDesfazer);
         };
@@ -4936,7 +5051,7 @@
         const aoBuscar = () => finalizar(true);
         video.addEventListener('seeked', aoBuscar);
         try {
-            if (!buscarVideoPara(video, fim)) throw new Error('O adaptador não conseguiu buscar a posição pedida');
+            if (!buscarVideoPara(video, destino)) throw new Error('O adaptador não conseguiu buscar a posição pedida');
         } catch (e) {
             finalizar(false);
             return false;
@@ -4946,7 +5061,7 @@
         // Aguarda a busca terminar e só mostra o aviso se o tempo realmente mudou.
         timerConfirmacao = setTimeout(() => {
             if (item.puloPendente !== pendencia) return;
-            finalizar(!video.seeking && Math.abs(obterTempoAtualDoVideo(video) - fim) <= 1.5);
+            finalizar(!video.seeking && Math.abs(obterTempoAtualDoVideo(video) - destino) <= 1.5);
         }, 2500);
         return true;
     }
@@ -4956,17 +5071,6 @@
 
         const atual = obterTempoAtualDoVideo(video);
         const total = obterDuracaoDoVideo(video);
-
-        if (!total || isNaN(total) || total <= 60) return;
-
-        videoAtivo = video;
-        monitorarEstabilidadeDeReproducao(video);
-
-        let smartSkip = GM_getValue('smartskip_op_' + obterChaveDaSerie(), null);
-        if (smartSkip && atual > smartSkip.s && atual < smartSkip.e - 1) {
-            buscarVideoPara(video, smartSkip.e);
-            exibirMensagemBreveNoPainel('🧠 Abertura pulada (Memória Inteligente)!');
-        }
 
         if (autoAniSkip && cacheAniSkip && cacheAniSkip.length) {
             for (let item of cacheAniSkip) {
@@ -4996,6 +5100,17 @@
                     }
                 } catch (e) {}
             }
+        }
+
+        if (!total || isNaN(total) || total <= 60) return;
+
+        videoAtivo = video;
+        monitorarEstabilidadeDeReproducao(video);
+
+        let smartSkip = GM_getValue('smartskip_op_' + obterChaveDaSerie(), null);
+        if (smartSkip && atual > smartSkip.s && atual < smartSkip.e - 1) {
+            buscarVideoPara(video, smartSkip.e);
+            exibirMensagemBreveNoPainel('🧠 Abertura pulada (Memória Inteligente)!');
         }
 
         if (autoPlay && video.paused) {

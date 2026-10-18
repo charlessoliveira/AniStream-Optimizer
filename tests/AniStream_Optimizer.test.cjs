@@ -438,6 +438,226 @@ test('falha temporária agenda retry crescente e libera a busca', () => {
     assert.match(source, /finally \{[\s\S]*?agendarRetryAniSkip\(aguardandoMetadados\)/);
 });
 
+test('iframe agenda uma única busca local em 1,5 s se o pai não respondeu', () => {
+    let agoraAgendado;
+    let callbackAgendado;
+    let buscas = 0;
+    const contexto = {
+        ehJanelaPrincipal: false,
+        autoAniSkip: true,
+        temporizadorBuscaLocalAniSkip: null,
+        aniskipBuscaEmAndamento: false,
+        aniskipBuscado: false,
+        cacheAniSkip: null,
+        executarBuscaLocalAniSkip() { buscas++; contexto.aniskipBuscaEmAndamento = true; },
+        buscaLocalAniSkipCallbackIndisponivel: false,
+        sequenciaSolicitacaoDadosAniSkip: 0,
+        tokenSolicitacaoDadosAniSkip: null,
+        tokenDadosAniSkipRecebidos: null,
+        urlSolicitacaoDadosAniSkip: '',
+        epocaSolicitacaoDadosAniSkip: -1,
+        epoca: 2,
+        sequenciaBuscaAniSkip: 4,
+        proximaBuscaAniSkipEm: 0,
+        window: { location: { href: 'https://anidrive.click/token/abc' } },
+        Date,
+        setTimeout(callback, atraso) {
+            callbackAgendado = callback;
+            agoraAgendado = atraso;
+            return 17;
+        },
+    };
+    vm.createContext(contexto);
+    vm.runInContext([
+        extrairFuncao('obterTokenSolicitacaoDadosAniSkip', 'tokenSolicitacaoDadosAniSkipAindaAtual'),
+        extrairFuncao('tokenSolicitacaoDadosAniSkipAindaAtual', 'agendarBuscaLocalAniSkip'),
+        extrairFuncao('agendarBuscaLocalAniSkip', 'solicitarDadosAniSkipAoPai')
+    ].join('\n'), contexto);
+
+    contexto.agendarBuscaLocalAniSkip();
+    contexto.agendarBuscaLocalAniSkip();
+    assert.equal(agoraAgendado, 1500);
+    assert.equal(contexto.temporizadorBuscaLocalAniSkip, 17);
+    assert.equal(buscas, 0);
+
+    callbackAgendado();
+    assert.equal(contexto.temporizadorBuscaLocalAniSkip, null);
+    assert.equal(buscas, 1);
+});
+
+test('fallback local espera uma única vez pelo callback e não bloqueia nova inicialização', () => {
+    const timers = [];
+    let buscas = 0;
+    const contexto = {
+        ehJanelaPrincipal: false,
+        autoAniSkip: true,
+        temporizadorBuscaLocalAniSkip: null,
+        aniskipBuscaEmAndamento: false,
+        aniskipBuscado: false,
+        cacheAniSkip: null,
+        executarBuscaLocalAniSkip: null,
+        buscaLocalAniSkipCallbackIndisponivel: false,
+        sequenciaSolicitacaoDadosAniSkip: 0,
+        tokenSolicitacaoDadosAniSkip: null,
+        tokenDadosAniSkipRecebidos: null,
+        urlSolicitacaoDadosAniSkip: '',
+        epocaSolicitacaoDadosAniSkip: -1,
+        epoca: 1,
+        sequenciaBuscaAniSkip: 0,
+        proximaBuscaAniSkipEm: 0,
+        window: { location: { href: 'https://anidrive.click/token/late-init' } },
+        Date,
+        setTimeout(callback, atraso) { timers.push({ callback, atraso }); return timers.length; },
+        console: { error() {} }
+    };
+    vm.createContext(contexto);
+    vm.runInContext([
+        extrairFuncao('obterTokenSolicitacaoDadosAniSkip', 'tokenSolicitacaoDadosAniSkipAindaAtual'),
+        extrairFuncao('tokenSolicitacaoDadosAniSkipAindaAtual', 'agendarBuscaLocalAniSkip'),
+        extrairFuncao('agendarBuscaLocalAniSkip', 'solicitarDadosAniSkipAoPai')
+    ].join('\n'), contexto);
+
+    contexto.agendarBuscaLocalAniSkip();
+    assert.equal(timers[0].atraso, 1500);
+    timers.shift().callback();
+    assert.equal(timers[0].atraso, 250);
+    assert.equal(contexto.aniskipBuscado, false);
+
+    contexto.executarBuscaLocalAniSkip = () => { buscas++; };
+    timers.shift().callback();
+    assert.equal(buscas, 1);
+    assert.equal(contexto.buscaLocalAniSkipCallbackIndisponivel, false);
+    assert.match(source, /executarBuscaLocalAniSkip = \(\) => buscarTemposAniSkip\(\)/);
+});
+
+test('fallback local atrasado é descartado após mudança de URL, época ou dados do pai', () => {
+    function criarFallback() {
+        let callback;
+        let buscas = 0;
+        const contexto = {
+            ehJanelaPrincipal: false,
+            autoAniSkip: true,
+            temporizadorBuscaLocalAniSkip: null,
+            aniskipBuscaEmAndamento: false,
+            aniskipBuscado: false,
+            cacheAniSkip: null,
+            executarBuscaLocalAniSkip() { buscas++; },
+            buscaLocalAniSkipCallbackIndisponivel: false,
+            sequenciaSolicitacaoDadosAniSkip: 0,
+            tokenSolicitacaoDadosAniSkip: null,
+            tokenDadosAniSkipRecebidos: null,
+            urlSolicitacaoDadosAniSkip: '',
+            epocaSolicitacaoDadosAniSkip: -1,
+            epoca: 1,
+            sequenciaBuscaAniSkip: 3,
+            proximaBuscaAniSkipEm: 0,
+            window: { location: { href: 'https://anidrive.click/token/ep-1' } },
+            Date,
+            setTimeout(fn) { callback = fn; return 5; },
+        };
+        vm.createContext(contexto);
+        vm.runInContext([
+            extrairFuncao('obterTokenSolicitacaoDadosAniSkip', 'tokenSolicitacaoDadosAniSkipAindaAtual'),
+            extrairFuncao('tokenSolicitacaoDadosAniSkipAindaAtual', 'agendarBuscaLocalAniSkip'),
+            extrairFuncao('agendarBuscaLocalAniSkip', 'solicitarDadosAniSkipAoPai')
+        ].join('\n'), contexto);
+        contexto.agendarBuscaLocalAniSkip();
+        return { contexto, executar() { callback(); }, obterBuscas() { return buscas; } };
+    }
+
+    const urlMudou = criarFallback();
+    urlMudou.contexto.window.location.href = 'https://anidrive.click/token/ep-2';
+    urlMudou.executar();
+    assert.equal(urlMudou.obterBuscas(), 0);
+
+    const epocaMudou = criarFallback();
+    epocaMudou.contexto.epoca++;
+    epocaMudou.executar();
+    assert.equal(epocaMudou.obterBuscas(), 0);
+
+    const paiRespondeu = criarFallback();
+    paiRespondeu.contexto.cacheAniSkip = [{ skipType: 'op', interval: { startTime: 1, endTime: 2 } }];
+    paiRespondeu.executar();
+    assert.equal(paiRespondeu.obterBuscas(), 0);
+
+    assert.match(source, /cancelarBuscaLocalAniSkip\(\);[\s\S]{0,250}if \(aniskipBuscaEmAndamento\)[\s\S]{0,100}sequenciaBuscaAniSkip\+\+;[\s\S]{0,140}cacheAniSkip = temposRecebidos;/);
+    assert.match(source, /requestId === tokenDadosAniSkipRecebidos\) return;/);
+    assert.match(source, /requestId,[\s\S]*?dados: cacheAniSkip/);
+});
+
+test('fallback local aguarda o backoff AniSkip em vez de consumir a única tentativa', () => {
+    let agora = 1000;
+    const timers = [];
+    let buscas = 0;
+    const contexto = {
+        ehJanelaPrincipal: false,
+        autoAniSkip: true,
+        temporizadorBuscaLocalAniSkip: null,
+        aniskipBuscaEmAndamento: false,
+        aniskipBuscado: false,
+        cacheAniSkip: null,
+        executarBuscaLocalAniSkip() { buscas++; },
+        buscaLocalAniSkipCallbackIndisponivel: false,
+        sequenciaSolicitacaoDadosAniSkip: 0,
+        tokenSolicitacaoDadosAniSkip: null,
+        tokenDadosAniSkipRecebidos: null,
+        urlSolicitacaoDadosAniSkip: '',
+        epocaSolicitacaoDadosAniSkip: -1,
+        epoca: 2,
+        sequenciaBuscaAniSkip: 4,
+        proximaBuscaAniSkipEm: 8000,
+        window: { location: { href: 'https://anidrive.click/token/backoff' } },
+        Date: { now: () => agora },
+        setTimeout(callback, atraso) { timers.push({ callback, atraso }); return timers.length; },
+    };
+    vm.createContext(contexto);
+    vm.runInContext([
+        extrairFuncao('obterTokenSolicitacaoDadosAniSkip', 'tokenSolicitacaoDadosAniSkipAindaAtual'),
+        extrairFuncao('tokenSolicitacaoDadosAniSkipAindaAtual', 'agendarBuscaLocalAniSkip'),
+        extrairFuncao('agendarBuscaLocalAniSkip', 'solicitarDadosAniSkipAoPai')
+    ].join('\n'), contexto);
+    contexto.agendarBuscaLocalAniSkip();
+
+    assert.equal(timers[0].atraso, 1500);
+    agora = 2500;
+    timers.shift().callback();
+    assert.equal(buscas, 0);
+    assert.equal(timers[0].atraso, 5500);
+
+    agora = 8000;
+    timers.shift().callback();
+    assert.equal(buscas, 1);
+});
+
+test('token de resposta AniSkip muda junto com URL ou época e rejeita tokens antigos', () => {
+    const contexto = {
+        sequenciaSolicitacaoDadosAniSkip: 0,
+        tokenSolicitacaoDadosAniSkip: null,
+        tokenDadosAniSkipRecebidos: null,
+        urlSolicitacaoDadosAniSkip: '',
+        epocaSolicitacaoDadosAniSkip: -1,
+        epoca: 7,
+        window: { location: { href: 'https://anidrive.click/token/ep-7' } },
+        Date
+    };
+    vm.createContext(contexto);
+    vm.runInContext([
+        extrairFuncao('obterTokenSolicitacaoDadosAniSkip', 'tokenSolicitacaoDadosAniSkipAindaAtual'),
+        extrairFuncao('tokenSolicitacaoDadosAniSkipAindaAtual', 'agendarBuscaLocalAniSkip')
+    ].join('\n'), contexto);
+
+    const tokenAntigo = contexto.obterTokenSolicitacaoDadosAniSkip();
+    assert.equal(contexto.tokenSolicitacaoDadosAniSkipAindaAtual(tokenAntigo), true);
+    contexto.window.location.href = 'https://anidrive.click/token/ep-8';
+    const tokenNovo = contexto.obterTokenSolicitacaoDadosAniSkip();
+    assert.notEqual(tokenNovo, tokenAntigo);
+    assert.equal(contexto.tokenSolicitacaoDadosAniSkipAindaAtual(tokenAntigo), false);
+    contexto.epoca++;
+    const tokenDaEpocaNova = contexto.obterTokenSolicitacaoDadosAniSkip();
+    assert.notEqual(tokenDaEpocaNova, tokenNovo);
+    assert.equal(contexto.tokenSolicitacaoDadosAniSkipAindaAtual(tokenNovo), false);
+});
+
 test('busca simulada recupera falha de rede e transmite os intervalos no retry', async () => {
     let agora = 1000;
     let requisicoes = 0;
@@ -512,6 +732,172 @@ test('busca simulada recupera falha de rede e transmite os intervalos no retry',
     assert.equal(contexto.cacheAniSkip[0].interval.endTime, 100);
     assert.equal(transmissao, 1);
     assert.equal(aplicacaoPulo, 1);
+});
+
+test('resolução AniSkip pendente é descartada ao mudar o episódio durante a busca offline', async () => {
+    let resolverOffline;
+    let requisicoes = 0;
+    const mensagens = [];
+    const contexto = {
+        autoAniSkip: true,
+        aniskipBuscado: false,
+        aniskipBuscaEmAndamento: false,
+        sequenciaBuscaAniSkip: 0,
+        tentativasFalhaAniSkip: 0,
+        tentativasLeituraAniSkip: 0,
+        proximaBuscaAniSkipEm: 0,
+        epoca: 3,
+        cacheAniSkip: null,
+        window: { location: { href: 'https://anime.test/episode-3' } },
+        Date,
+        URLSearchParams,
+        GM_getValue() { return null; },
+        GM_setValue() { assert.fail('Busca obsoleta não pode persistir dados'); },
+        extrairInfoDoEpisodioParaAniSkip() { return { nomeLimpo: 'Teste', episodio: 3 }; },
+        nomeAnimeAtualParaExibicao: '',
+        obterMalIdManualParaEpisodio() { return null; },
+        buscarMalIdOffline() { return new Promise(resolve => { resolverOffline = resolve; }); },
+        buscarMalIdViaAniList() { assert.fail('Busca obsoleta não deve avançar para AniList'); },
+        garantirMetadadosDoAnime() {},
+        atualizarStatusAniSkip(_nome, _ep, mensagem) { mensagens.push(mensagem); },
+        obterChaveDaSerie() { return 'teste'; },
+        requisitarJsonAniSkip() { requisicoes++; },
+        aniskipMalIdValido(valor) { return Number.isSafeInteger(Number(valor)) && Number(valor) > 0; },
+        aniskipBuscaAindaAtual(sequencia, epoca, url) {
+            return sequencia === contexto.sequenciaBuscaAniSkip &&
+                epoca === contexto.epoca && url === contexto.window.location.href;
+        },
+        agendarRetryAniSkip() { assert.fail('Busca obsoleta não deve agendar retry'); }
+    };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('buscarTemposAniSkip', 'auxiliarDeAutoplayInjetadoNaPagina'), contexto);
+
+    const busca = contexto.buscarTemposAniSkip();
+    await Promise.resolve();
+    const mensagensAntesDaMudanca = mensagens.length;
+    contexto.sequenciaBuscaAniSkip++;
+    contexto.epoca++;
+    contexto.window.location.href = 'https://anime.test/episode-4';
+    resolverOffline(null);
+    await busca;
+
+    assert.equal(mensagens.length, mensagensAntesDaMudanca);
+    assert.equal(requisicoes, 0);
+    assert.equal(contexto.cacheAniSkip, null);
+});
+
+test('resolução AniList pendente não persiste nem consulta AniSkip após mudança de episódio', async () => {
+    let resolverAniList;
+    let sinalizarAniListChamado;
+    let requisicoes = 0;
+    const mensagens = [];
+    const aniListChamado = new Promise(resolve => { sinalizarAniListChamado = resolve; });
+    const contexto = {
+        autoAniSkip: true,
+        aniskipBuscado: false,
+        aniskipBuscaEmAndamento: false,
+        sequenciaBuscaAniSkip: 0,
+        tentativasFalhaAniSkip: 0,
+        tentativasLeituraAniSkip: 0,
+        proximaBuscaAniSkipEm: 0,
+        epoca: 5,
+        cacheAniSkip: null,
+        window: { location: { href: 'https://anime.test/episode-5' } },
+        Date,
+        URLSearchParams,
+        GM_getValue() { return null; },
+        GM_setValue() { assert.fail('Busca obsoleta não pode persistir dados'); },
+        extrairInfoDoEpisodioParaAniSkip() { return { nomeLimpo: 'Teste', episodio: 5 }; },
+        nomeAnimeAtualParaExibicao: '',
+        obterMalIdManualParaEpisodio() { return null; },
+        buscarMalIdOffline() { return Promise.resolve(null); },
+        buscarMalIdViaAniList() {
+            return new Promise(resolve => {
+                resolverAniList = resolve;
+                sinalizarAniListChamado();
+            });
+        },
+        garantirMetadadosDoAnime() {},
+        atualizarStatusAniSkip(_nome, _ep, mensagem) { mensagens.push(mensagem); },
+        obterChaveDaSerie() { return 'teste'; },
+        requisitarJsonAniSkip() { requisicoes++; },
+        aniskipMalIdValido(valor) { return Number.isSafeInteger(Number(valor)) && Number(valor) > 0; },
+        aniskipBuscaAindaAtual(sequencia, epoca, url) {
+            return sequencia === contexto.sequenciaBuscaAniSkip &&
+                epoca === contexto.epoca && url === contexto.window.location.href;
+        },
+        agendarRetryAniSkip() { assert.fail('Busca obsoleta não deve agendar retry'); }
+    };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('buscarTemposAniSkip', 'auxiliarDeAutoplayInjetadoNaPagina'), contexto);
+
+    const busca = contexto.buscarTemposAniSkip();
+    await aniListChamado;
+    const mensagensAntesDaMudanca = mensagens.length;
+    contexto.sequenciaBuscaAniSkip++;
+    contexto.epoca++;
+    contexto.window.location.href = 'https://anime.test/episode-6';
+    resolverAniList({ malId: 123, origem: 'teste' });
+    await busca;
+
+    assert.equal(mensagens.length, mensagensAntesDaMudanca);
+    assert.equal(requisicoes, 0);
+    assert.equal(contexto.cacheAniSkip, null);
+});
+
+test('resposta AniSkip atrasada de um episódio não altera status nem cache do atual', async () => {
+    let resolverTempos;
+    let requisicaoIniciada;
+    const requisicaoAniSkipIniciada = new Promise(resolve => { requisicaoIniciada = resolve; });
+    const mensagens = [];
+    const contexto = {
+        autoAniSkip: true,
+        aniskipBuscado: false,
+        aniskipBuscaEmAndamento: false,
+        sequenciaBuscaAniSkip: 0,
+        tentativasFalhaAniSkip: 0,
+        tentativasLeituraAniSkip: 0,
+        proximaBuscaAniSkipEm: 0,
+        epoca: 9,
+        cacheAniSkip: null,
+        window: { location: { href: 'https://anime.test/episode-9' } },
+        Date,
+        URLSearchParams,
+        GM_getValue(chave, padrao) { return chave === 'aniskip_malid_teste' ? 55 : padrao; },
+        GM_setValue() {},
+        extrairInfoDoEpisodioParaAniSkip() { return { nomeLimpo: 'Teste', episodio: 9 }; },
+        nomeAnimeAtualParaExibicao: '',
+        obterMalIdManualParaEpisodio() { return { malId: 55, origem: 'manual' }; },
+        garantirMetadadosDoAnime() { return Promise.resolve(); },
+        atualizarStatusAniSkip(_nome, _ep, mensagem) { mensagens.push(mensagem); },
+        obterChaveDaSerie() { return 'teste'; },
+        aniskipMalIdValido(valor) { return Number.isSafeInteger(Number(valor)) && Number(valor) > 0; },
+        requisitarJsonAniSkip() {
+            requisicaoIniciada();
+            return new Promise(resolve => { resolverTempos = resolve; });
+        },
+        aniskipBuscaAindaAtual(sequencia, epoca, url) {
+            return sequencia === contexto.sequenciaBuscaAniSkip &&
+                epoca === contexto.epoca && url === contexto.window.location.href;
+        }
+    };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('buscarTemposAniSkip', 'auxiliarDeAutoplayInjetadoNaPagina'), contexto);
+
+    const busca = contexto.buscarTemposAniSkip();
+    await requisicaoAniSkipIniciada;
+    const mensagensAntesDaMudanca = mensagens.length;
+    contexto.sequenciaBuscaAniSkip++;
+    contexto.epoca++;
+    contexto.window.location.href = 'https://anime.test/episode-10';
+    resolverTempos({
+        found: true,
+        results: [{ skipType: 'op', interval: { startTime: 20, endTime: 40 } }]
+    });
+    await busca;
+
+    assert.equal(mensagens.length, mensagensAntesDaMudanca);
+    assert.equal(contexto.cacheAniSkip, null);
 });
 
 test('429 agenda nova tentativa e 404 continua sendo tratado como ausência de tempos', async () => {
@@ -602,16 +988,135 @@ test('resposta atrasada de outro episódio não pode preencher o cache atual', (
     assert.match(source, /sequenciaBuscaAniSkip\+\+;[\s\S]*?aniskipBuscaEmAndamento = false;[\s\S]*?cacheAniSkip = null;/);
 });
 
+test('ANISKIP_DADOS aceita somente o pai autorizado ou um caso opaco estrito', () => {
+    const topWindow = {};
+    const contexto = {
+        ehJanelaPrincipal: false,
+        cfgSites: {},
+        window: { top: topWindow, location: { ancestorOrigins: ['https://anime.test'] } },
+        hostnameDeOrigemConfiavel(origem) {
+            try { return new URL(origem).hostname; } catch { return null; }
+        },
+        hostnameDoSitePrincipalPorAncestorOrigins(origens) {
+            try { return origens.length ? new URL(origens[origens.length - 1]).hostname : null; } catch { return null; }
+        },
+        resolverAtivacaoDoSite(host) { return { ativo: host === 'anime.test' }; }
+    };
+    vm.createContext(contexto);
+    vm.runInContext(
+        extrairFuncao('mensagemAniSkipVemDoPaiAutorizado', 'transmitirDadosAniSkipParaFrames'),
+        contexto
+    );
+
+    assert.equal(contexto.mensagemAniSkipVemDoPaiAutorizado({
+        source: topWindow, origin: 'https://anime.test'
+    }), true);
+    assert.equal(contexto.mensagemAniSkipVemDoPaiAutorizado({
+        source: {}, origin: 'https://anime.test'
+    }), false);
+    assert.equal(contexto.mensagemAniSkipVemDoPaiAutorizado({
+        source: topWindow, origin: 'https://attacker.test'
+    }), false);
+    assert.equal(contexto.mensagemAniSkipVemDoPaiAutorizado({
+        source: topWindow, origin: 'null'
+    }), false);
+
+    contexto.window.location.ancestorOrigins = [];
+    assert.equal(contexto.mensagemAniSkipVemDoPaiAutorizado({
+        source: topWindow, origin: 'null'
+    }), true);
+    assert.match(source, /e\.data\.acao === 'ANISKIP_DADOS'\) \{\s*if \(!mensagemAniSkipVemDoPaiAutorizado\(e\)\) return;/);
+});
+
+test('mutação SPA reagenda uma varredura e detecta o player inserido dinamicamente', () => {
+    let executarTimer;
+    let atrasoAgendado;
+    let playerAtual = null;
+    const contexto = {
+        timerVarredura: null,
+        setTimeout(callback, atraso) {
+            executarTimer = callback;
+            atrasoAgendado = atraso;
+            return 1;
+        },
+        buscarEAtivarVideos() {
+            contexto.playerEncontrado = playerAtual;
+        },
+        playerEncontrado: null
+    };
+    vm.createContext(contexto);
+    vm.runInContext([
+        extrairFuncao('lidarComMutacoesDoDom', 'agendarBuscaEAtivacaoDeVideos'),
+        extrairFuncao('agendarBuscaEAtivacaoDeVideos', 'observarDocumentoParaDeteccaoDeVideo')
+    ].join('\n'), contexto);
+
+    const novoPlayer = {};
+    playerAtual = novoPlayer;
+    contexto.lidarComMutacoesDoDom([{
+        target: { nodeType: 1, closest() { return null; } }
+    }]);
+    contexto.lidarComMutacoesDoDom([{
+        target: { nodeType: 1, closest() { return null; } }
+    }]);
+
+    assert.equal(atrasoAgendado, 150);
+    assert.equal(contexto.timerVarredura, 1);
+    executarTimer();
+    assert.equal(contexto.timerVarredura, null);
+    assert.equal(contexto.playerEncontrado, novoPlayer);
+});
+
+test('observar repetidamente o mesmo documento não duplica listeners nem observers', () => {
+    let listeners = 0;
+    let observadores = 0;
+    let injecoes = 0;
+    const doc = {
+        documentElement: {},
+        addEventListener() { listeners++; }
+    };
+    const contexto = {
+        EVENTOS_MIDIA: ['timeupdate', 'playing'],
+        docsObservados: new WeakSet(),
+        document: doc,
+        injetarScriptAuxiliarNoDocumento() { injecoes++; },
+        injetarCSSNoDocumento() { injecoes++; },
+        documentoNaoRecebeUserscript() { return false; },
+        lidarComEventosDoPlayerDeVideo() {},
+        lidarComMutacoesDoDom() {},
+        lidarComCliqueDoUsuarioNaPagina() {},
+        lidarComAtalhosDeTeclado() {},
+        MutationObserver: class {
+            constructor() { observadores++; }
+            observe() {}
+        }
+    };
+    vm.createContext(contexto);
+    vm.runInContext(
+        extrairFuncao('observarDocumentoParaDeteccaoDeVideo', 'garantirQuePainelDeStatusEstaVisivel'),
+        contexto
+    );
+    contexto.observarDocumentoParaDeteccaoDeVideo(doc);
+    contexto.observarDocumentoParaDeteccaoDeVideo(doc);
+
+    assert.equal(listeners, 2);
+    assert.equal(observadores, 1);
+    assert.equal(injecoes, 2);
+});
+
 test('resultados válidos são encaminhados a frames que aguardam o pai', () => {
     const recebido = [];
     const frame = { postMessage(mensagem) { recebido.push(mensagem); } };
     const contexto = {
         ehJanelaPrincipal: true,
         cacheAniSkip: [{ skipType: 'op', interval: { startTime: 12, endTime: 24 } }],
-        framesAguardandoDadosAniSkip: new Set([frame]),
-        document: { querySelectorAll() { return []; } },
-        enviarDadosAniSkipParaFrame(janela) {
-            janela.postMessage({ app: 'ANIME_V44', acao: 'ANISKIP_DADOS', dados: contexto.cacheAniSkip });
+        framesAguardandoDadosAniSkip: new Map([[frame, 'request-42']]),
+        enviarDadosAniSkipParaFrame(janela, _origem, requestId) {
+            janela.postMessage({
+                app: 'ANIME_V44',
+                acao: 'ANISKIP_DADOS',
+                requestId,
+                dados: contexto.cacheAniSkip
+            });
         }
     };
     vm.createContext(contexto);
@@ -620,6 +1125,7 @@ test('resultados válidos são encaminhados a frames que aguardam o pai', () => 
 
     assert.equal(recebido.length, 1);
     assert.equal(recebido[0].acao, 'ANISKIP_DADOS');
+    assert.equal(recebido[0].requestId, 'request-42');
     assert.equal(recebido[0].dados[0].interval.endTime, 24);
     assert.equal(contexto.framesAguardandoDadosAniSkip.size, 0);
     assert.match(source, /const temposRecebidos = normalizarResultadosAniSkip\(e\.data\.dados\);[\s\S]*?cacheAniSkip = temposRecebidos;[\s\S]*?aplicarPuloAniSkipSeJaEstiverNoTrecho\(\)/);
@@ -666,6 +1172,193 @@ test('timeupdate pula OP e ED somente ao entrar nos intervalos retornados', () =
         assert.equal(pulos[0].item.skipType, tipo);
         assert.equal(pulos[0].fim, 20);
     }
+});
+
+test('timeupdate aplica AniSkip mesmo antes de o player informar a duração', () => {
+    const video = { currentTime: 3.3, duration: NaN, paused: false, seeking: false };
+    let pulos = 0;
+    const contexto = {
+        jaAvancou: false,
+        estadoAutoFHDVerificando: () => false,
+        obterTempoAtualDoVideo: v => v.currentTime,
+        obterDuracaoDoVideo: v => v.duration,
+        videoAtivo: null,
+        monitorarEstabilidadeDeReproducao() {},
+        cacheAniSkip: [{ skipType: 'op', interval: { startTime: 0, endTime: 122 }, jaPulou: false }],
+        autoAniSkip: true,
+        autoNext: false,
+        siteUsaAutoNextNativo: () => false,
+        solicitarPuloAniSkipComConfirmacao() { pulos++; return true; }
+    };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('lidarComAtualizacaoDeTempoDoVideo', 'lidarComMutacoesDoDom'), contexto);
+    contexto.lidarComAtualizacaoDeTempoDoVideo(video);
+
+    assert.equal(pulos, 1);
+});
+
+test('timeupdate fora do intervalo da OP não solicita pulo', () => {
+    const video = { currentTime: 5, duration: 120, paused: false, seeking: false };
+    let pulos = 0;
+    const contexto = {
+        jaAvancou: false,
+        estadoAutoFHDVerificando: () => false,
+        obterTempoAtualDoVideo: v => v.currentTime,
+        obterDuracaoDoVideo: v => v.duration,
+        videoAtivo: null,
+        monitorarEstabilidadeDeReproducao() {},
+        GM_getValue: () => null,
+        obterChaveDaSerie: () => 'anime',
+        cacheAniSkip: [{ skipType: 'op', interval: { startTime: 10, endTime: 20 }, jaPulou: false }],
+        autoAniSkip: true,
+        autoNext: false,
+        siteUsaAutoNextNativo: () => false,
+        solicitarPuloAniSkipComConfirmacao() { pulos++; return true; },
+        autoPlay: false,
+        expandirVideoConformeHierarquia() {},
+        Date: { now: () => 5000 },
+        ultimoAvisoTempo: 5000,
+        atualizarPainelDeStatusNaJanela() {},
+        ehJanelaPrincipal: true,
+        verificarSeEpisodioEstaTerminando() {}
+    };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('lidarComAtualizacaoDeTempoDoVideo', 'lidarComMutacoesDoDom'), contexto);
+    contexto.lidarComAtualizacaoDeTempoDoVideo(video);
+
+    assert.equal(pulos, 0);
+    assert.equal(contexto.cacheAniSkip[0].jaPulou, false);
+});
+
+test('ED aciona Auto-Next no intervalo retornado mesmo sem depender do salto de OP', () => {
+    const video = { currentTime: 95, duration: 120, paused: false, seeking: false };
+    let avancos = 0;
+    const contexto = {
+        jaAvancou: false,
+        estadoAutoFHDVerificando: () => false,
+        obterTempoAtualDoVideo: v => v.currentTime,
+        obterDuracaoDoVideo: v => v.duration,
+        videoAtivo: null,
+        monitorarEstabilidadeDeReproducao() {},
+        GM_getValue: () => null,
+        obterChaveDaSerie: () => 'anime',
+        cacheAniSkip: [{ skipType: 'ed', interval: { startTime: 90, endTime: 100 }, jaPulou: false }],
+        autoAniSkip: true,
+        autoNext: true,
+        siteUsaAutoNextNativo: () => false,
+        avancarParaProximoEpisodio() { avancos++; },
+        exibirMensagemBreveNoPainel() {},
+        autoPlay: false,
+        expandirVideoConformeHierarquia() {},
+        Date: { now: () => 5000 },
+        ultimoAvisoTempo: 5000,
+        atualizarPainelDeStatusNaJanela() {},
+        ehJanelaPrincipal: true,
+        verificarSeEpisodioEstaTerminando() {}
+    };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('lidarComAtualizacaoDeTempoDoVideo', 'lidarComMutacoesDoDom'), contexto);
+    contexto.lidarComAtualizacaoDeTempoDoVideo(video);
+
+    assert.equal(avancos, 1);
+    assert.equal(contexto.cacheAniSkip[0].jaPulou, true);
+});
+
+test('seek AniSkip limita fim do intervalo à duração reproduzível do vídeo', () => {
+    let timerAgendado;
+    let destinoSolicitado;
+    const item = { jaPulou: false, puloPendente: null };
+    const video = {
+        readyState: 4,
+        duration: 100,
+        currentTime: 20,
+        seeking: false,
+        isConnected: true,
+        listeners: {},
+        addEventListener(nome, callback) { this.listeners[nome] = callback; },
+        removeEventListener(nome) { delete this.listeners[nome]; }
+    };
+    const contexto = {
+        epoca: 4,
+        obterTempoAtualDoVideo(v) { return v.currentTime; },
+        buscarVideoPara(v, destino) {
+            destinoSolicitado = destino;
+            v.currentTime = destino;
+            return true;
+        },
+        clearTimeout() {},
+        setTimeout(callback) { timerAgendado = callback; return 1; },
+        exibirMensagemBreveNoPainel() {}
+    };
+    vm.createContext(contexto);
+    vm.runInContext(
+        extrairFuncao('solicitarPuloAniSkipComConfirmacao', 'lidarComAtualizacaoDeTempoDoVideo'),
+        contexto
+    );
+
+    assert.equal(contexto.solicitarPuloAniSkipComConfirmacao(video, item, 122, 'OP pulada'), true);
+    assert.equal(destinoSolicitado, 99.75);
+    timerAgendado();
+    assert.equal(item.jaPulou, true);
+    assert.equal(item.puloPendente, null);
+});
+
+test('AniSkip sem tempos válidos não bloqueia autoplay nem o Auto-Next', () => {
+    const video = { currentTime: 99, duration: 100, paused: true, seeking: false };
+    let reproducoes = 0;
+    let avancos = 0;
+    const contexto = {
+        jaAvancou: false,
+        estadoAutoFHDVerificando: () => false,
+        obterTempoAtualDoVideo: v => v.currentTime,
+        obterDuracaoDoVideo: v => v.duration,
+        videoAtivo: null,
+        monitorarEstabilidadeDeReproducao() {},
+        GM_getValue: () => null,
+        obterChaveDaSerie: () => 'anime',
+        cacheAniSkip: null,
+        autoAniSkip: true,
+        autoNext: true,
+        siteUsaAutoNextNativo: () => false,
+        autoPlay: true,
+        tentarReproduzirVideoAutomaticamente(v) {
+            reproducoes++;
+            v.paused = false;
+        },
+        expandirVideoConformeHierarquia() {},
+        Date: { now: () => 5000 },
+        ultimoAvisoTempo: 5000,
+        atualizarPainelDeStatusNaJanela() {},
+        ehJanelaPrincipal: true,
+        tempoPulo: 3,
+        armado: true,
+        avancarParaProximoEpisodio() { avancos++; }
+    };
+    vm.createContext(contexto);
+    vm.runInContext([
+        extrairFuncao('lidarComAtualizacaoDeTempoDoVideo', 'lidarComMutacoesDoDom'),
+        extrairFuncao('verificarSeEpisodioEstaTerminando', 'obterRaizesDoPlayerParaRetomada')
+    ].join('\n'), contexto);
+    contexto.lidarComAtualizacaoDeTempoDoVideo(video);
+
+    assert.equal(reproducoes, 1);
+    assert.equal(avancos, 1);
+});
+
+test('JSON inválido da API AniSkip rejeita a requisição sem dados falsos', async () => {
+    const contexto = {
+        GM_xmlhttpRequest(opcoes) {
+            opcoes.onload({ status: 200, responseText: '{malformado' });
+        },
+        setTimeout
+    };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('requisitarJsonAniSkip', 'obterChaveDaSerie'), contexto);
+
+    await assert.rejects(
+        contexto.requisitarJsonAniSkip('https://api.aniskip.com/test'),
+        erro => erro && erro.name === 'SyntaxError'
+    );
 });
 
 test('X permanece discreto e fecha apenas o menu sem propagar o clique', () => {
