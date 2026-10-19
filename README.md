@@ -2,7 +2,7 @@
 
 Userscript para automatizar e personalizar a reprodução de episódios de anime. O código também está publicado no [Greasy Fork](https://greasyfork.org/pt-BR/scripts/597329-anistream-optimizer-autoplay-auto-next-spa-aniskip).
 
-Versão do repositório: **1.3.1**.
+Versão do repositório: **1.3.2**.
 
 ## Recursos
 
@@ -11,13 +11,19 @@ Versão do repositório: **1.3.1**.
 - Modo teatro, botão flutuante reposicionável com identidade AO em SVG inline e controles do player em menu flutuante.
 - Botão flutuante unificado: clique simples abre os comandos; clique duplo expande/recolhe o player.
 - Menu de comandos com botão X compacto e independente, ao lado do botão flutuante.
-- Auto Fullscreen e Auto Expandir como preferências independentes.
+- Duplo clique no botão flutuante expande o player e solicita tela cheia nativa do navegador; essa solicitação depende do gesto do usuário. Auto Fullscreen também aplica o modo teatro automaticamente entre episódios; Auto Expandir pode ser ativado separadamente. No fullscreen nativo, os controles flutuantes acompanham o player e voltam à posição original ao sair.
 - Recusar ou permitir a retomada de reprodução nos players compatíveis.
 - Preferência de qualidade em JW Player e Plyr; Automática é o padrão.
-- Seleção adaptativa de servidores Full HD quando o site oferece fontes alternativas, com verificação da reprodução e recuperação em caso de falha.
+- Seleção adaptativa de servidores Full HD quando o site oferece fontes alternativas, com verificação da reprodução e recuperação em caso de falha; no Goyabu, prioriza o player HD em iframe e evita alternância por watchdog sem erro confirmado.
 - Atalhos editáveis, aviso de pulo e opção para desfazer o pulo recente.
 - Suporte a páginas SPA e a players HTML5, JW Player e Plyr, incluindo players em iframe quando acessíveis.
 - Preferências por site e comandos de configuração no Tampermonkey.
+
+### 1.3.2
+
+- Corrige a seleção de player no Goyabu: prioriza HD, não alterna servidores por ausência de vídeo detectável e tenta fallback apenas após erro confirmado.
+- Ajusta autoplay em iframes Blogger para iniciar silenciado e aplica permissões sem recarregar o iframe.
+- Impede que controles genéricos de resultados de busca sejam acionados pelo autoclicker; o duplo clique no botão flutuante também solicita fullscreen nativo durante o gesto.
 
 ### 1.3.1
 

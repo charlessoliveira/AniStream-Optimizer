@@ -1,3 +1,10 @@
+AniStream Optimizer 1.3.2
+
+- Corrige a seleção de player no Goyabu: prioriza HD, não alterna servidores por ausência de vídeo detectável e tenta fallback apenas após erro confirmado.
+- Ajusta autoplay em iframes Blogger para iniciar silenciado e aplica permissões sem recarregar o iframe.
+- Impede que controles genéricos de resultados de busca sejam acionados pelo autoclicker.
+- Faz o duplo clique no botão flutuante solicitar fullscreen nativo durante o gesto e mantém o modo teatro automático entre episódios quando Auto Fullscreen está ativo.
+
 AniStream Optimizer 1.3.1
 
 - Corrige AniSkip em players cross-origin carregados com atraso, incluindo AnimesROLL.

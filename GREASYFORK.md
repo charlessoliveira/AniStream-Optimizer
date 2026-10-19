@@ -6,7 +6,7 @@ Userscript para automatizar tarefas comuns ao assistir animes: iniciar a reprodu
 
 - **Auto Play:** tenta iniciar o vídeo automaticamente quando o player aparece ou é atualizado. O navegador ou o próprio site pode exigir interação, ou bloquear a reprodução com áudio; nesses casos, o comportamento depende do player.
 - **Auto Next:** aciona o próximo episódio automaticamente perto do fim. O tempo de antecipação pode ser configurado no menu do Tampermonkey (padrão: 3 segundos).
-- **Auto Fullscreen:** opção para solicitar tela cheia automaticamente quando o site/player permitir. Navegadores podem exigir um gesto do usuário para entrar em tela cheia.
+- **Expansão:** duplo clique no botão flutuante expande o player e solicita tela cheia nativa do navegador, usando o próprio gesto do usuário. Auto Fullscreen também mantém o player expandido automaticamente entre episódios com o modo teatro.
 - **Auto Expandir:** expande o player para o modo de teatro do AniStream automaticamente. Também é possível alternar manualmente pelo botão flutuante.
 - **Recusar/permitir retomada:** controla a opção de continuar de onde parou nos players compatíveis. Por padrão, o script recusa a retomada em Anroll, AnimesOnline e Anidrive.
 - **AniSkip:** consulta os tempos de abertura e encerramento disponíveis para a série e tenta pular os trechos automaticamente. A disponibilidade depende de haver dados para o anime/episódio e de o player permitir controlar a reprodução.

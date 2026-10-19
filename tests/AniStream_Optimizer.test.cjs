@@ -227,6 +227,23 @@ test('tentativa inicial expira após 15 segundos se os servidores não aparecere
     assert.equal(cenario.botaoFHD.cliques, 0);
 });
 
+test('Auto-FHD não escolhe uma resolução alternativa quando Full HD está ausente', () => {
+    const cenario = criarCenario();
+    const servidor720 = {
+        isConnected: true,
+        cliques: 0,
+        click() { this.cliques++; }
+    };
+    cenario.definirServidores([{ botao: servidor720, rotulo: '720p' }]);
+    cenario.atualizar();
+    cenario.definirAgora(16000);
+    cenario.atualizar();
+
+    assert.equal(servidor720.cliques, 0);
+    assert.equal(cenario.botaoFHD.cliques, 0);
+    assert.equal(cenario.contexto.estadoAutoFHD, 'concluido');
+});
+
 function criarCenarioTeatro() {
     const video = {
         isConnected: true,
@@ -367,9 +384,53 @@ test('clique simples abre menu e clique duplo cancela o clique simples e alterna
 
     assert.match(listener, /if \(timerCliqueFab !== null\)/);
     assert.match(listener, /clearTimeout\(timerCliqueFab\)/);
+    assert.match(listener, /if \(!expandido && videoAtivo\) ativarTelaCheiaNoVideo\(videoAtivo, true\)/);
     assert.match(listener, /definirModoTeatro\(!expandido\)/);
     assert.match(listener, /setTimeout\(\(\) => \{[\s\S]*?abrirMenuFlutuante\(\);[\s\S]*?\}, 350\)/);
     assert.match(listener, /document\.body\.classList\.remove\('au-menu-flutuante-aberto'\)/);
+});
+
+test('duplo clique no FAB pode solicitar fullscreen nativo mesmo com Auto Fullscreen desligado', () => {
+    const video = { isConnected: true };
+    let solicitacoes = 0;
+    const contexto = {
+        autoFullscreen: false,
+        fullscreenTentado: false,
+        document: { fullscreenElement: null, webkitFullscreenElement: null },
+        obterAdaptadorDeVideo() { return { requestFullscreen() { solicitacoes++; } }; },
+        obterAlvoTelaCheia() { return { isConnected: true }; },
+        prepararControlesParaTelaCheia() {},
+        registrarListenerDeTelaCheia() {},
+        restaurarControlesAposTelaCheia() {}
+    };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('ativarTelaCheiaNoVideo', 'obterAlvoTelaCheia'), contexto);
+
+    contexto.ativarTelaCheiaNoVideo(video);
+    assert.equal(solicitacoes, 0);
+    contexto.ativarTelaCheiaNoVideo(video, true);
+    assert.equal(solicitacoes, 1);
+});
+
+test('autoclicker não aciona botões genéricos fora de uma área de embed', () => {
+    const inicio = source.indexOf('    const SELETORES_AUTOCLICK_INICIAR = ');
+    const fim = source.indexOf('    const SELETORES_AUTOCLICK_ALTERNAR = ', inicio);
+    assert.notEqual(inicio, -1);
+    assert.notEqual(fim, -1);
+    const seletores = source.slice(inicio, fim);
+    assert.doesNotMatch(seletores, /\.play-button/);
+    assert.match(source, /if \(!controleSemVideoEhInicioDeEmbed\(btn\)\) return;/);
+
+    const contexto = {
+        SELETOR_AUTOCLICK_EMBED_SEGURO: '#pembed .embed-play .play-btn, .player-embed .embed-play .play-btn'
+    };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('controleSemVideoEhInicioDeEmbed', 'executarAutoClickerDePlayers'), contexto);
+
+    const botaoBusca = { matches: selector => selector.includes('.play-button') };
+    const botaoEmbed = { matches: selector => selector.includes('.embed-play .play-btn') };
+    assert.equal(contexto.controleSemVideoEhInicioDeEmbed(botaoBusca), false);
+    assert.equal(contexto.controleSemVideoEhInicioDeEmbed(botaoEmbed), true);
 });
 
 test('botão X fecha somente o menu e tem nome acessível', () => {
@@ -1461,4 +1522,367 @@ test('logo compacta fica à esquerda dos comandos sem interferir no X nem nos bo
     assert.match(source, /\.au-logo-ao-menu \{ width: 20px !important; height: 16px !important; \}/);
     assert.match(source, /document\.body\.appendChild\(controlBar\);\s*document\.body\.appendChild\(botaoFecharMenu\);/);
     assert.doesNotMatch(source, /controlBar\.appendChild\(botaoFecharMenu\)/);
+});
+
+test('Auto Fullscreen prefere um contêiner de player aos controles nativos isolados do vídeo', () => {
+    const body = { tagName: 'BODY' };
+    const documentElement = { tagName: 'HTML' };
+    const wrapper = { tagName: 'DIV', isConnected: true };
+    const parent = { tagName: 'DIV', isConnected: true };
+    const video = {
+        tagName: 'VIDEO',
+        ownerDocument: { body, documentElement },
+        parentElement: parent,
+        isConnected: true,
+        closest(selector) { return selector.includes('.player-wrapper') ? wrapper : null; }
+    };
+    const contexto = { document: {} };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('obterAlvoTelaCheia', 'prepararControlesParaTelaCheia'), contexto);
+
+    assert.equal(contexto.obterAlvoTelaCheia(video, { elemento: { tagName: 'DIV', isConnected: true } }).tagName, 'DIV');
+    assert.equal(contexto.obterAlvoTelaCheia(video, null), wrapper);
+    video.closest = () => null;
+    assert.equal(contexto.obterAlvoTelaCheia(video, null), parent);
+    video.parentElement = body;
+    assert.equal(contexto.obterAlvoTelaCheia(video, null), video);
+});
+
+test('Auto Fullscreen aplica modo teatro automaticamente uma vez por episódio', () => {
+    const video = {};
+    const solicitacoes = [];
+    const contexto = {
+        autoFullscreen: true,
+        autoTeatro: false,
+        teatroTentado: false,
+        solicitarModoTeatro(videoRecebido, ligar) {
+            solicitacoes.push({ video: videoRecebido, ligar });
+        },
+        ativarTelaCheiaNoVideo() {
+            assert.fail('Não deve solicitar fullscreen nativo sem gesto do usuário');
+        }
+    };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('expandirVideoConformeHierarquia', 'lidarComAtalhosDeTeclado'), contexto);
+
+    contexto.expandirVideoConformeHierarquia(video);
+    contexto.expandirVideoConformeHierarquia(video);
+
+    assert.deepEqual(solicitacoes, [{ video, ligar: true }]);
+    assert.equal(contexto.teatroTentado, true);
+});
+
+test('controles flutuantes entram no contêiner fullscreen e retornam à posição original ao sair', () => {
+    function criarPai(nome) {
+        const classes = new Set();
+        const pai = {
+            nome,
+            filhos: [],
+            classList: {
+                add(valor) { classes.add(valor); },
+                remove(valor) { classes.delete(valor); },
+                contains(valor) { return classes.has(valor); }
+            },
+            appendChild(elemento) {
+                if (elemento.parentNode) {
+                    const antigos = elemento.parentNode.filhos;
+                    antigos.splice(antigos.indexOf(elemento), 1);
+                }
+                this.filhos.push(elemento);
+                elemento.parentNode = this;
+                return elemento;
+            },
+            insertBefore(elemento, proximo) {
+                if (elemento.parentNode) {
+                    const antigos = elemento.parentNode.filhos;
+                    antigos.splice(antigos.indexOf(elemento), 1);
+                }
+                const indice = this.filhos.indexOf(proximo);
+                this.filhos.splice(indice < 0 ? this.filhos.length : indice, 0, elemento);
+                elemento.parentNode = this;
+                return elemento;
+            },
+            contains(elemento) {
+                for (let atual = elemento; atual; atual = atual.parentNode) {
+                    if (atual === this) return true;
+                }
+                return false;
+            }
+        };
+        return pai;
+    }
+    function criarElemento(id) {
+        const classes = new Set();
+        const elemento = {
+            id,
+            parentNode: null,
+            classList: {
+                add(valor) { classes.add(valor); },
+                remove(valor) { classes.delete(valor); },
+                contains(valor) { return classes.has(valor); }
+            },
+            get nextSibling() {
+                if (!this.parentNode) return null;
+                const filhos = this.parentNode.filhos;
+                return filhos[filhos.indexOf(this) + 1] || null;
+            }
+        };
+        return elemento;
+    }
+    const body = criarPai('body');
+    const target = criarPai('player');
+    target.tagName = 'DIV';
+    const before = criarElemento('before');
+    const controles = ['au-fab-teatro', 'au-control-bar', 'au-menu-fechar', 'au-skip-toast'].map(criarElemento);
+    const after = criarElemento('after');
+    [before, ...controles, after].forEach(elemento => body.appendChild(elemento));
+    const porId = new Map(controles.map(elemento => [elemento.id, elemento]));
+    const contexto = {
+        controlesMovidosParaTelaCheia: null,
+        document: { getElementById(id) { return porId.get(id) || null; } }
+    };
+    vm.createContext(contexto);
+    vm.runInContext(
+        extrairFuncao('prepararControlesParaTelaCheia', 'colocarControlesNaTelaCheia') +
+        extrairFuncao('restaurarControlesAposTelaCheia', 'registrarListenerDeTelaCheia'),
+        contexto
+    );
+
+    assert.equal(contexto.prepararControlesParaTelaCheia(target), true);
+    assert.deepEqual(target.filhos, controles);
+    assert.equal(target.classList.contains('au-autofullscreen-container'), true);
+    contexto.restaurarControlesAposTelaCheia();
+    assert.deepEqual(body.filhos, [before, ...controles, after]);
+    assert.equal(target.classList.contains('au-autofullscreen-container'), false);
+});
+
+test('Goyabu seleciona somente o primeiro player iframe HD e não repete a troca', () => {
+    let clicksFhd = 0;
+    let clicksHd = 0;
+    const attr = (label, type) => ({
+        'data-player-name': label,
+        'data-player-type': type,
+        class: '',
+        'aria-selected': null,
+        'aria-pressed': null,
+        'aria-current': null,
+        'data-active': null
+    });
+    const fhdAttrs = attr('FHD', 'iframe');
+    const hdAttrs = attr('HD', 'iframe');
+    const fhd = {
+        isConnected: true,
+        disabled: false,
+        textContent: 'FHD',
+        getAttribute(name) { return fhdAttrs[name] ?? null; },
+        click() { clicksFhd++; }
+    };
+    const hd = {
+        isConnected: true,
+        disabled: false,
+        textContent: 'HD',
+        getAttribute(name) { return hdAttrs[name] ?? null; },
+        click() {
+            clicksHd++;
+            fhdAttrs.class = '';
+            hdAttrs.class = 'active';
+        }
+    };
+    fhdAttrs.class = 'active';
+    const player = {
+        querySelectorAll(selector) {
+            return selector.includes('data-player-type') ? [hd] : [fhd, hd];
+        }
+    };
+    const logs = [];
+    const contexto = {
+        ehJanelaPrincipal: true,
+        siteGoyabu: true,
+        goyabuHdSelecionado: false,
+        goyabuFallbackParaHdFeito: false,
+        goyabuFhdIndisponivel: false,
+        fallbackTentativas: 0,
+        watchdogTempo: 9,
+        REGEX_SERVIDOR_FULLHD: /\b(?:FHD|FULL\s*HD|1080P?)\b/i,
+        document: {
+            querySelector(selector) { return selector === '#player' ? player : null; },
+            querySelectorAll() { return [fhd, hd]; }
+        },
+        console: { info(...args) { logs.push(args); } }
+    };
+    vm.createContext(contexto);
+    vm.runInContext([
+        extrairFuncao('obterRotuloDoBotaoServidor', 'obterBotoesDeServidor'),
+        extrairFuncao('obterBotaoHdGoyabu', 'logDiagnostico'),
+        extrairFuncao('logDiagnostico', 'selecionarHdGoyabu'),
+        extrairFuncao('selecionarHdGoyabu', 'garantirPlayerHdGoyabu'),
+        extrairFuncao('garantirPlayerHdGoyabu', 'botaoServidorEstaAtivo'),
+        extrairFuncao('botaoServidorEstaAtivo', 'estadoAutoFHDVerificando')
+    ].join('\n'), contexto);
+
+    assert.equal(contexto.garantirPlayerHdGoyabu(), true);
+    assert.equal(clicksHd, 1);
+    assert.equal(clicksFhd, 0);
+    assert.equal(contexto.goyabuFhdIndisponivel, true);
+    assert.equal(logs.some(([message]) => message === '[Goyabu] FHD indisponível: decode_blogger_video retornou play vazio'), true);
+    assert.equal(logs.some(([message]) => message === '[Goyabu] HD selecionado'), true);
+    assert.equal(contexto.garantirPlayerHdGoyabu(), true);
+    assert.equal(clicksHd, 1);
+});
+
+test('fallback Goyabu ignora watchdog e limita erro confirmado a uma troca segura para HD', () => {
+    const tabs = [];
+    let hdClicks = 0;
+    const hdAttrs = {
+        'data-player-name': 'HD',
+        'data-player-type': 'iframe',
+        class: '',
+        'aria-selected': null,
+        'aria-pressed': null,
+        'aria-current': null,
+        'data-active': null
+    };
+    const hd = {
+        isConnected: true,
+        disabled: false,
+        textContent: 'HD',
+        getAttribute(name) { return hdAttrs[name] ?? null; },
+        click() { hdClicks++; hdAttrs.class = 'active'; }
+    };
+    const fhdAttrs = {
+        'data-player-name': 'FHD',
+        'data-player-type': 'iframe',
+        class: 'active',
+        'aria-selected': null,
+        'aria-pressed': null,
+        'aria-current': null,
+        'data-active': null
+    };
+    const fhd = {
+        isConnected: true,
+        disabled: false,
+        textContent: 'FHD',
+        getAttribute(name) { return fhdAttrs[name] ?? null; },
+        click() { assert.fail('O FHD nunca deve ser acionado'); }
+    };
+    tabs.push(fhd, hd);
+    const player = { querySelectorAll(selector) { return selector.includes('data-player-type') ? [hd] : tabs; } };
+    const contexto = {
+        ehJanelaPrincipal: true,
+        siteGoyabu: true,
+        goyabuHdSelecionado: false,
+        goyabuFallbackParaHdFeito: false,
+        goyabuFhdIndisponivel: false,
+        fallbackTentativas: 0,
+        watchdogTempo: 0,
+        jaAvancou: false,
+        autoFHDControlandoSelecao() { return false; },
+        REGEX_SERVIDOR_FULLHD: /\b(?:FHD|FULL\s*HD|1080P?)\b/i,
+        document: {
+            querySelector(selector) { return selector === '#player' ? player : null; },
+            querySelectorAll() { return tabs; }
+        },
+        console: { info() {} }
+    };
+    vm.createContext(contexto);
+    vm.runInContext([
+        extrairFuncao('obterRotuloDoBotaoServidor', 'obterBotoesDeServidor'),
+        extrairFuncao('obterBotaoHdGoyabu', 'logDiagnostico'),
+        extrairFuncao('logDiagnostico', 'selecionarHdGoyabu'),
+        extrairFuncao('selecionarHdGoyabu', 'garantirPlayerHdGoyabu'),
+        extrairFuncao('botaoServidorEstaAtivo', 'estadoAutoFHDVerificando'),
+        extrairFuncao('tentarClicarProximoServidor', 'verificarSeEpisodioEstaTerminando')
+    ].join('\n'), contexto);
+
+    contexto.tentarClicarProximoServidor('watchdog');
+    assert.equal(hdClicks, 0);
+    contexto.tentarClicarProximoServidor('media-error');
+    contexto.tentarClicarProximoServidor('media-error');
+    assert.equal(hdClicks, 1);
+    assert.equal(contexto.goyabuFallbackParaHdFeito, true);
+});
+
+test('watchdog reconhece iframe cross-origin do player sem trocar por ausência de videoAtivo', () => {
+    const frame = { getAttribute() { return 'https://www.blogger.com/video.g?token=abc'; } };
+    const contexto = {
+        document: {
+            location: { href: 'https://goyabu.io/75242', origin: 'https://goyabu.io' },
+            querySelectorAll() { return [frame]; }
+        },
+        URL
+    };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('iframeCrossOriginDePlayerExiste', 'garantirPermissaoDeAutoplayNoIframe'), contexto);
+    assert.equal(contexto.iframeCrossOriginDePlayerExiste(), true);
+    frame.getAttribute = () => 'https://goyabu.io/embed';
+    assert.equal(contexto.iframeCrossOriginDePlayerExiste(), false);
+});
+
+test('permissões do iframe Blogger são aplicadas sem recarregar ou alterar src', () => {
+    const attrs = { src: 'https://www.blogger.com/video.g?token=abc', allow: '' };
+    const frame = {
+        getAttribute(name) { return attrs[name] || ''; },
+        setAttribute(name, value) { attrs[name] = value; }
+    };
+    const contexto = {
+        iframesComPermissaoAjustada: new WeakSet(),
+        HOSTS_DE_PLAYER_CONHECIDOS: ['blogger.com', 'googlevideo.com', 'drive.google.com'],
+        autoFullscreen: false,
+        window: { location: { href: 'https://goyabu.io/75242' } },
+        URL,
+        hostCorrespondeADominio(host, domain) { return host === domain || host.endsWith(`.${domain}`); }
+    };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('garantirPermissaoDeAutoplayNoIframe', 'coletarTodosOsDocumentosIncluindoIframes'), contexto);
+    contexto.garantirPermissaoDeAutoplayNoIframe(frame);
+    assert.match(attrs.allow, /autoplay/);
+    assert.match(attrs.allow, /fullscreen/);
+    assert.equal(attrs.src, 'https://www.blogger.com/video.g?token=abc');
+    const inicio = source.indexOf('        for (const f of iframes) {');
+    assert.notEqual(inicio, -1);
+    assert.match(source.slice(inicio, source.indexOf('function documentoNaoRecebeUserscript', inicio)),
+        /if \(!iframesLigados\.has\(f\)\)[\s\S]*?\}\s*garantirPermissaoDeAutoplayNoIframe\(f\);/);
+});
+
+test('primeiro play em iframe Blogger define muted, defaultMuted, autoplay e playsinline', () => {
+    const logs = [];
+    const estado = { epoca: 1, tentativas: 0, ultima: 0, pausaAteMs: 0, estavel: false, falhasPlay: 0 };
+    const video = {
+        paused: true,
+        ended: false,
+        muted: false,
+        defaultMuted: false,
+        autoplay: false,
+        currentSrc: 'https://video.test/source.mp4',
+        attributes: {},
+        setAttribute(name, value) { this.attributes[name] = value; },
+        play() {
+            assert.equal(this.muted, true);
+            assert.equal(this.defaultMuted, true);
+            assert.equal(this.autoplay, true);
+            assert.equal(this.attributes.playsinline, '');
+            return undefined;
+        }
+    };
+    const contexto = {
+        autoPlay: true,
+        jaAvancou: false,
+        iframeBlogger: true,
+        frameBloggerDoAnimesDrive: false,
+        precisaMudo: false,
+        estadoAutoFHDVerificando() { return false; },
+        tentativaAutoFHD: null,
+        videoEhElegivelParaAutoplay() { return true; },
+        videoPossuiFonteDeMidia() { return true; },
+        obterOuCriarEstadoDoVideo() { return estado; },
+        tentativaDePlayEmAndamento() { return false; },
+        agendarSegundoAcionamentoDoPlayerMobile() {},
+        logDiagnostico(message) { logs.push(message); },
+        Date
+    };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('tentarReproduzirVideoAutomaticamente', 'forcarReproducaoDoVideo'), contexto);
+    contexto.tentarReproduzirVideoAutomaticamente(video);
+    assert.equal(contexto.precisaMudo, true);
+    assert.ok(logs.includes('[Autoplay] tentativa muted'));
 });

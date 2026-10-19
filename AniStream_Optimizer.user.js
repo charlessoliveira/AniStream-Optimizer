@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AniStream Optimizer (Autoplay + Auto-Next + SPA + AniSkip)
 // @namespace    http://tampermonkey.net/
-// @version      1.3.1
+// @version      1.3.2
 // @description  Autoplay persistente, auto-next, suporte a SPA, recusa automática de retomada e pulo de abertura/encerramento via AniSkip.
 // @author       Você (com apoio do Claude e do Gemini)
 // @license      MIT
@@ -278,6 +278,17 @@
         try {
             const hostPrincipal = hostnameDoSitePrincipalPorAncestorOrigins(window.location.ancestorOrigins);
             return hostCorrespondeADominio(hostPrincipal, 'animesdrive.cloud');
+        } catch (e) { return false; }
+    })();
+    const iframeBlogger = hostCorrespondeADominio(hostAtual, 'blogger.com');
+    const siteGoyabu = (() => {
+        if (hostCorrespondeADominio(hostAtual, 'goyabu.io')) return true;
+        if (ehJanelaPrincipal) return false;
+        try {
+            return hostCorrespondeADominio(
+                hostnameDoSitePrincipalPorAncestorOrigins(window.location.ancestorOrigins),
+                'goyabu.io'
+            );
         } catch (e) { return false; }
     })();
 
@@ -600,6 +611,8 @@
 
     let videoAtivo = null;
     let fullscreenTentado = false;
+    let controlesMovidosParaTelaCheia = null;
+    let listenerTelaCheiaRegistrado = false;
     let teatroTentado = false;
 
     let jaAvancou = false;
@@ -609,6 +622,9 @@
     let fallbackTentativas = 0;
     let watchdogTempo = 0;
     let indiceServidorFallback = -1;
+    let goyabuHdSelecionado = false;
+    let goyabuFallbackParaHdFeito = false;
+    let goyabuFhdIndisponivel = false;
     let estadoAutoFHD = 'espera';
     let tentativaAutoFHD = null;
     let sequenciaTentativaAutoFHD = 0;
@@ -1107,6 +1123,7 @@
                 const expandido = document.body.classList.contains('au-teatro-ativo');
                 document.body.classList.remove('au-menu-flutuante-aberto');
                 atualizarVisualFabExpandido();
+                if (!expandido && videoAtivo) ativarTelaCheiaNoVideo(videoAtivo, true);
                 definirModoTeatro(!expandido);
                 resetarInatividade();
                 return;
@@ -1200,7 +1217,10 @@
                         framesAguardandoDadosAniSkip.set(e.source, requestId);
                     }
                 }
-                else if (e.data.acao === 'FALLBACK_SERVIDOR') tentarClicarProximoServidor();
+                else if (e.data.acao === 'FALLBACK_SERVIDOR') {
+                    const motivo = typeof e.data.motivo === 'string' ? e.data.motivo.slice(0, 40) : 'media-error';
+                    tentarClicarProximoServidor(motivo);
+                }
             }
         });
     }
@@ -1866,6 +1886,8 @@
                     const rotulo = obterRotuloDoBotaoServidor(botao);
                     if (!rotulo || !botao.isConnected || botao.disabled ||
                         botao.getAttribute('aria-disabled') === 'true') return;
+                    if (typeof siteGoyabu !== 'undefined' && siteGoyabu &&
+                        REGEX_SERVIDOR_FULLHD.test(rotulo)) return;
                     const href = botao.getAttribute('href');
                     if (botao.tagName === 'A' && href && !/^(#|javascript:)/i.test(href) &&
                         botao.href !== doc.location.href) return;
@@ -1880,6 +1902,69 @@
         }
         return botoes.filter((item, indice, todos) =>
             todos.findIndex(outro => outro.botao === item.botao) === indice);
+    }
+
+    function obterBotaoHdGoyabu() {
+        try {
+            const player = document.querySelector('#player');
+            if (!player) return null;
+            const candidatos = Array.from(player.querySelectorAll('.player-tab[data-player-type="iframe"]'));
+            const primeiro = candidatos[0];
+            if (!primeiro || !primeiro.isConnected || primeiro.disabled ||
+                primeiro.getAttribute('aria-disabled') === 'true') return null;
+            const rotulo = obterRotuloDoBotaoServidor(primeiro);
+            if (REGEX_SERVIDOR_FULLHD.test(rotulo)) return null;
+            return primeiro;
+        } catch (e) { return null; }
+    }
+
+    function logDiagnostico(texto, dados) {
+        try { console.info(texto, dados || ''); } catch (e) {}
+    }
+
+    function selecionarHdGoyabu(motivo, fallback = false) {
+        if (!ehJanelaPrincipal || !siteGoyabu) return false;
+        if (fallback && goyabuFallbackParaHdFeito) return false;
+        const botaoHd = obterBotaoHdGoyabu();
+        if (!botaoHd) return false;
+        const abas = Array.from(document.querySelectorAll('#player .player-tab'));
+        const origemAtiva = abas.find(botaoServidorEstaAtivo) || null;
+        const rotuloOrigem = origemAtiva ? obterRotuloDoBotaoServidor(origemAtiva) : 'desconhecida';
+        if (botaoServidorEstaAtivo(botaoHd)) {
+            goyabuHdSelecionado = true;
+            goyabuFallbackParaHdFeito = true;
+            return true;
+        }
+        if (!fallback && goyabuHdSelecionado) return true;
+
+        goyabuHdSelecionado = true;
+        if (fallback) goyabuFallbackParaHdFeito = true;
+        if (origemAtiva && REGEX_SERVIDOR_FULLHD.test(rotuloOrigem)) {
+            goyabuFhdIndisponivel = true;
+            logDiagnostico('[Goyabu] FHD indisponível: decode_blogger_video retornou play vazio');
+        }
+        fallbackTentativas++;
+        watchdogTempo = 0;
+        logDiagnostico('[Fallback] troca de servidor', {
+            motivo,
+            origem: rotuloOrigem,
+            destino: obterRotuloDoBotaoServidor(botaoHd)
+        });
+        try {
+            botaoHd.click();
+            logDiagnostico('[Goyabu] HD selecionado');
+            return true;
+        } catch (e) {
+            logDiagnostico('[Goyabu] falha ao selecionar HD', e && e.message);
+            return false;
+        }
+    }
+
+    function garantirPlayerHdGoyabu() {
+        if (!ehJanelaPrincipal || !siteGoyabu) return false;
+        goyabuFhdIndisponivel = true;
+        if (goyabuHdSelecionado) return true;
+        return selecionarHdGoyabu('preferência pelo player iframe HD');
     }
 
     function botaoServidorEstaAtivo(botao) {
@@ -2023,6 +2108,12 @@
 
     function atualizarAutoFHD() {
         if (!ehJanelaPrincipal || estadoAutoFHD === 'concluido') return;
+        if (typeof siteGoyabu !== 'undefined' && siteGoyabu) {
+            goyabuFhdIndisponivel = true;
+            garantirPlayerHdGoyabu();
+            concluirTentativaAutoFHD('');
+            return;
+        }
         if (!autoFHD && !estadoAutoFHDVerificando()) {
             const tentativaCancelada = tentativaAutoFHD;
             tentativaAutoFHD = null;
@@ -2140,8 +2231,14 @@
         }
     }
 
-    function tentarClicarProximoServidor() {
-        if (autoFHDControlandoSelecao() || fallbackTentativas >= 4 || jaAvancou) return;
+    function tentarClicarProximoServidor(motivo = 'watchdog') {
+        if (autoFHDControlandoSelecao() || jaAvancou) return;
+        if (typeof siteGoyabu !== 'undefined' && siteGoyabu) {
+            if (!['media-error', 'setup-error', 'timeout-confirmado'].includes(motivo)) return;
+            selecionarHdGoyabu(motivo, true);
+            return;
+        }
+        if (fallbackTentativas >= 4) return;
         fallbackTentativas++;
         watchdogTempo = 0;
 
@@ -2161,7 +2258,14 @@
             indiceServidorFallback = 0;
         }
 
-        try { servidores[indiceServidorFallback].click(); } catch (e) {}
+        const destino = servidores[indiceServidorFallback];
+        const origem = servidores.find(botaoServidorEstaAtivo);
+        logDiagnostico('[Fallback] troca de servidor', {
+            motivo,
+            origem: origem ? obterRotuloDoBotaoServidor(origem) : 'desconhecida',
+            destino: obterRotuloDoBotaoServidor(destino)
+        });
+        try { destino.click(); } catch (e) {}
     }
 
     function verificarSeEpisodioEstaTerminando(atual, total) {
@@ -2319,7 +2423,8 @@
 
     function lidarComCliqueDoUsuarioNaPagina(e) {
         precisaMudo = false;
-        if (autoFullscreen && !autoTeatro && videoAtivo && !fullscreenTentado) {
+        const cliqueNoFab = !!(e && e.target && e.target.closest && e.target.closest('#au-fab-teatro'));
+        if (!cliqueNoFab && autoFullscreen && !autoTeatro && videoAtivo && !fullscreenTentado) {
             ativarTelaCheiaNoVideo(videoAtivo);
         }
         if (autoPlay) {
@@ -2355,7 +2460,8 @@
     });
 
     // ---------- Auto-clicker de players ----------
-    const SELETORES_AUTOCLICK_INICIAR = '.embed-play .play-btn, .vjs-big-play-button, .vjs-poster, .plyr__control--overlaid, .play-button';
+    const SELETORES_AUTOCLICK_INICIAR = '.embed-play .play-btn, .vjs-big-play-button, .vjs-poster, .plyr__control--overlaid';
+    const SELETOR_AUTOCLICK_EMBED_SEGURO = '#pembed .embed-play .play-btn, .player-embed .embed-play .play-btn';
     const SELETORES_AUTOCLICK_ALTERNAR = '.vjs-play-control, .jw-display-icon-display';
     const SELETOR_CONTAINER_DE_PLAYER = '.video-js, .jwplayer, .plyr';
     const AUTOCLICK_MAX_TENTATIVAS_POR_CONTROLE = 3;
@@ -2380,6 +2486,12 @@
         try {
             return !!(container && container.matches && container.matches('.jwplayer') &&
                 container.ownerDocument.documentElement.getAttribute('data-au-jw') === '1');
+        } catch (e) { return false; }
+    }
+
+    function controleSemVideoEhInicioDeEmbed(btn) {
+        try {
+            return !!(btn && btn.matches && btn.matches(SELETOR_AUTOCLICK_EMBED_SEGURO));
         } catch (e) { return false; }
     }
 
@@ -2451,6 +2563,7 @@
                 }
 
                 if (ehAlternar) return;
+                if (!controleSemVideoEhInicioDeEmbed(btn)) return;
                 if (docTemVideoTocando === null) docTemVideoTocando = documentoTemVideoVisivelTocando(document);
                 if (docTemVideoTocando) return;
                 clicarControleDeInicioUmaVez(btn, container || btn);
@@ -2503,17 +2616,110 @@
     // ==========================================
     // 4.5 AUTO-FULLSCREEN E ATALHOS DE TECLADO
     // ==========================================
-    function ativarTelaCheiaNoVideo(video) {
-        if (!autoFullscreen || fullscreenTentado || !video) return;
-        if (document.fullscreenElement) { fullscreenTentado = true; return; }
+    function ativarTelaCheiaNoVideo(video, acionadoPorUsuario = false) {
+        if ((!autoFullscreen && !acionadoPorUsuario) || fullscreenTentado || !video) return;
+        const fullscreenAtual = document.fullscreenElement || document.webkitFullscreenElement || null;
+        if (fullscreenAtual) {
+            fullscreenTentado = true;
+            if (fullscreenAtual !== video && fullscreenAtual.tagName !== 'VIDEO') colocarControlesNaTelaCheia(fullscreenAtual);
+            registrarListenerDeTelaCheia();
+            return;
+        }
+        const adaptador = obterAdaptadorDeVideo(video);
+        const alvoTelaCheia = obterAlvoTelaCheia(video, adaptador);
+        if (!alvoTelaCheia) return;
+        prepararControlesParaTelaCheia(alvoTelaCheia);
+        registrarListenerDeTelaCheia();
         fullscreenTentado = true;
         try {
-            const adaptador = obterAdaptadorDeVideo(video);
             let p = adaptador ? adaptador.requestFullscreen() : video.requestFullscreen();
-            if (p && p.catch) p.catch(() => { fullscreenTentado = false; });
+            if (p === false) {
+                restaurarControlesAposTelaCheia();
+                fullscreenTentado = false;
+                return;
+            }
+            if (p && p.catch) p.catch(() => {
+                restaurarControlesAposTelaCheia();
+                fullscreenTentado = false;
+            });
         } catch (e) {
+            restaurarControlesAposTelaCheia();
             fullscreenTentado = false;
         }
+    }
+
+    function obterAlvoTelaCheia(video, adaptador) {
+        if (!video || !video.ownerDocument) return null;
+        const candidato = adaptador && adaptador.elemento;
+        if (candidato && candidato.isConnected && candidato.tagName !== 'VIDEO') return candidato;
+
+        let contenedor = null;
+        try {
+            contenedor = video.closest('.video-container, .player-container, .player-wrapper, .video-js, .plyr, .jwplayer');
+        } catch (e) {}
+        if (contenedor && contenedor.isConnected) return contenedor;
+
+        const padre = video.parentElement;
+        if (padre && padre !== video.ownerDocument.body && padre !== video.ownerDocument.documentElement) return padre;
+        return video;
+    }
+
+    function prepararControlesParaTelaCheia(alvo) {
+        if (!alvo || alvo.tagName === 'VIDEO' || !alvo.appendChild) return false;
+        if (controlesMovidosParaTelaCheia) restaurarControlesAposTelaCheia();
+        const elementos = ['au-fab-teatro', 'au-control-bar', 'au-menu-fechar', 'au-skip-toast']
+            .map(id => document.getElementById(id))
+            .filter(el => el && el !== alvo && !(alvo.contains && alvo.contains(el)));
+        const locaisOriginais = elementos.map(el => ({ elemento: el, pai: el.parentNode, proximo: el.nextSibling }))
+            .filter(item => item.pai);
+        const classeJaExistia = !!(alvo.classList && alvo.classList.contains('au-autofullscreen-container'));
+        try {
+            if (alvo.classList) alvo.classList.add('au-autofullscreen-container');
+            locaisOriginais.forEach(item => alvo.appendChild(item.elemento));
+            controlesMovidosParaTelaCheia = { alvo, locaisOriginais, classeJaExistia };
+            return true;
+        } catch (e) {
+            locaisOriginais.slice().reverse().forEach(item => {
+                try {
+                    if (item.proximo && item.proximo.parentNode === item.pai) item.pai.insertBefore(item.elemento, item.proximo);
+                    else item.pai.appendChild(item.elemento);
+                } catch (erro) {}
+            });
+            if (!classeJaExistia && alvo.classList) alvo.classList.remove('au-autofullscreen-container');
+            return false;
+        }
+    }
+
+    function colocarControlesNaTelaCheia(alvo) {
+        if (!alvo || alvo.tagName === 'VIDEO' || !alvo.appendChild) return false;
+        if (controlesMovidosParaTelaCheia && controlesMovidosParaTelaCheia.alvo === alvo) return true;
+        return prepararControlesParaTelaCheia(alvo);
+    }
+
+    function restaurarControlesAposTelaCheia() {
+        const estado = controlesMovidosParaTelaCheia;
+        if (!estado) return;
+        estado.locaisOriginais.slice().reverse().forEach(item => {
+            try {
+                if (item.proximo && item.proximo.parentNode === item.pai) item.pai.insertBefore(item.elemento, item.proximo);
+                else item.pai.appendChild(item.elemento);
+            } catch (e) {}
+        });
+        if (!estado.classeJaExistia && estado.alvo.classList) estado.alvo.classList.remove('au-autofullscreen-container');
+        controlesMovidosParaTelaCheia = null;
+    }
+
+    function registrarListenerDeTelaCheia() {
+        if (listenerTelaCheiaRegistrado) return;
+        listenerTelaCheiaRegistrado = true;
+        const sincronizar = () => {
+            const alvoAtivo = document.fullscreenElement || document.webkitFullscreenElement || null;
+            if (!alvoAtivo) restaurarControlesAposTelaCheia();
+            else if (alvoAtivo.tagName !== 'VIDEO') colocarControlesNaTelaCheia(alvoAtivo);
+            requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+        };
+        document.addEventListener('fullscreenchange', sincronizar);
+        document.addEventListener('webkitfullscreenchange', sincronizar);
     }
 
     // ==========================================
@@ -2763,7 +2969,7 @@
     }
 
     function expandirVideoConformeHierarquia(video) {
-        if (autoTeatro) {
+        if (autoTeatro || autoFullscreen) {
             if (!teatroTentado) {
                 teatroTentado = true;
                 solicitarModoTeatro(video, true);
@@ -3078,7 +3284,8 @@
         if (!s || s.epoca !== epoca) {
             s = {
                 epoca, tentativas: 0, ultima: 0, tPlaying: 0, estavel: false, src: '',
-                playPendente: false, playDesde: 0, playId: 0, falhasPlay: 0, pausaAteMs: 0
+                playPendente: false, playDesde: 0, playId: 0, falhasPlay: 0, pausaAteMs: 0,
+                autoplayTentativaLogada: false, autoplaySucessoLogado: false, autoplayNotAllowedLogado: false
             };
             try { s.src = video.currentSrc || video.src || ''; } catch (e) {}
             estadoVideo.set(video, s);
@@ -3131,7 +3338,14 @@
 
     function ativarReproducaoEmModoMudo(video) {
         precisaMudo = true;
-        try { video.muted = true; } catch (e) {}
+        try {
+            video.muted = true;
+            if (iframeBlogger) {
+                video.defaultMuted = true;
+                video.autoplay = true;
+                video.setAttribute('playsinline', '');
+            }
+        } catch (e) {}
         let p = null;
         try {
             p = video.play();
@@ -3161,8 +3375,16 @@
             if (!ehAtual()) return;
             s.playPendente = false;
             s.falhasPlay = 0;
+            if (iframeBlogger && !s.autoplaySucessoLogado) {
+                s.autoplaySucessoLogado = true;
+                logDiagnostico('[Autoplay] sucesso');
+            }
         }, err => {
             if (!ehAtual()) return;
+            if (err && err.name === 'NotAllowedError' && !s.autoplayNotAllowedLogado) {
+                s.autoplayNotAllowedLogado = true;
+                logDiagnostico('[Autoplay] NotAllowedError');
+            }
             if (aoFalhar && aoFalhar(err)) return;
             s.playPendente = false;
             if (!err || err.name !== 'AbortError') s.falhasPlay++;
@@ -3211,9 +3433,11 @@
         s.tentativas++;
 
         try {
-            if (frameBloggerDoAnimesDrive && !s.modoMudoInicialAplicado) {
+            if (iframeBlogger && !s.modoMudoInicialAplicado) {
                 video.muted = true;
                 video.defaultMuted = true;
+                video.autoplay = true;
+                video.setAttribute('playsinline', '');
                 precisaMudo = true;
                 s.modoMudoInicialAplicado = true;
                 notificarQueAutoplayEstaMudo();
@@ -3224,7 +3448,18 @@
         } catch (e) {}
 
         let p, lancouExcecao = false;
-        try { p = video.play(); } catch (e) { p = null; lancouExcecao = true; }
+        try { p = video.play(); } catch (e) {
+            p = null;
+            lancouExcecao = true;
+            if (e && e.name === 'NotAllowedError' && !s.autoplayNotAllowedLogado) {
+                s.autoplayNotAllowedLogado = true;
+                logDiagnostico('[Autoplay] NotAllowedError');
+            }
+        }
+        if (iframeBlogger && !s.autoplayTentativaLogada) {
+            s.autoplayTentativaLogada = true;
+            logDiagnostico('[Autoplay] tentativa muted');
+        }
         if (lancouExcecao) {
             s.falhasPlay++;
             agendarSegundoAcionamentoDoPlayerMobile(video, s);
@@ -4082,8 +4317,8 @@
                 try { p.on('autostartNotAllowed', function () { mudoPlay(p); }); } catch (e) {}
                 try { p.on('playAttemptFailed', function () { mudoPlay(p); }); } catch (e) {}
                 try { p.on('playlistItem', function () { arrancou = false; tent = 0; }); } catch (e) {}
-                try { p.on('error', function () { rep('⚠️ JW Erro de Reprodução'); window.top.postMessage({ app: 'ANIME_V44', acao: 'FALLBACK_SERVIDOR' }, '*'); }); } catch (e) {}
-                try { p.on('setupError', function () { rep('⚠️ JW Erro de Setup'); window.top.postMessage({ app: 'ANIME_V44', acao: 'FALLBACK_SERVIDOR' }, '*'); }); } catch (e) {}
+                try { p.on('error', function () { rep('⚠️ JW Erro de Reprodução'); window.top.postMessage({ app: 'ANIME_V44', acao: 'FALLBACK_SERVIDOR', motivo: 'media-error' }, '*'); }); } catch (e) {}
+                try { p.on('setupError', function () { rep('⚠️ JW Erro de Setup'); window.top.postMessage({ app: 'ANIME_V44', acao: 'FALLBACK_SERVIDOR', motivo: 'setup-error' }, '*'); }); } catch (e) {}
             }
 
             var st = p.getState();
@@ -4202,6 +4437,16 @@
             flex: 0 0 auto !important; pointer-events: none !important;
         }
         #au-fab-teatro[data-au-expanded="true"] { background: linear-gradient(145deg, #0f766e, #115e59) !important; box-shadow: 0 8px 24px rgba(0,0,0,0.42), 0 0 0 3px rgba(52,211,153,.2), inset 0 1px 0 rgba(255,255,255,0.25) !important; }
+        .au-autofullscreen-container:fullscreen,
+        .au-autofullscreen-container:-webkit-full-screen {
+            width: 100vw !important; height: 100vh !important; max-width: none !important; max-height: none !important;
+            margin: 0 !important; background: #000 !important; overflow: hidden !important;
+        }
+        .au-autofullscreen-container:fullscreen video,
+        .au-autofullscreen-container:-webkit-full-screen video {
+            width: 100% !important; height: 100% !important; max-width: 100vw !important; max-height: 100vh !important;
+            object-fit: contain !important;
+        }
         #au-fab-teatro.au-fab-arrastando, #au-fab-teatro.au-fab-arrastando:hover { transition: none !important; transform: none !important; cursor: grabbing !important; }
         #au-fab-teatro:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 28px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.3) !important; }
         #au-fab-teatro:active { transform: scale(0.94) !important; }
@@ -4716,7 +4961,7 @@
             return adaptador;
         }
 
-        const html5Container = video.closest('.video-container') || video;
+        const html5Container = obterAlvoTelaCheia(video, null) || video;
         return {
             tipo: 'html5', elemento: html5Container, api: video,
             getCurrentTime: () => obterNumero(() => video.currentTime, 0),
@@ -4726,7 +4971,6 @@
             requestFullscreen: () => {
                 if (html5Container.requestFullscreen) return html5Container.requestFullscreen();
                 if (html5Container.webkitRequestFullscreen) return html5Container.webkitRequestFullscreen();
-                if (video.requestFullscreen) return video.requestFullscreen();
                 return false;
             }
         };
@@ -4834,6 +5078,9 @@
         fallbackTentativas = 0;
         watchdogTempo = 0;
         indiceServidorFallback = -1;
+        goyabuHdSelecionado = false;
+        goyabuFallbackParaHdFeito = false;
+        goyabuFhdIndisponivel = false;
         armado = false;
         videoAtivo = null;
         ultimoAvisoTempo = 0;
@@ -4873,6 +5120,18 @@
 
     const HOSTS_DE_PLAYER_CONHECIDOS = ['blogger.com', 'googlevideo.com', 'drive.google.com'];
 
+    function iframeCrossOriginDePlayerExiste() {
+        const seletores = '#player iframe, #pembed iframe, .player-embed iframe, .player-container iframe, .video-container iframe, .player-wrapper iframe';
+        try {
+            return Array.from(document.querySelectorAll(seletores)).some(frame => {
+                const src = frame.getAttribute('src') || '';
+                if (!src || /^about:blank(?:#.*)?$/i.test(src)) return false;
+                const origemFrame = new URL(src, document.location.href).origin;
+                return origemFrame !== document.location.origin;
+            });
+        } catch (e) { return false; }
+    }
+
     function garantirPermissaoDeAutoplayNoIframe(f) {
         if (iframesComPermissaoAjustada.has(f)) return;
         try {
@@ -4887,12 +5146,10 @@
             const tokens = (f.getAttribute('allow') || '').split(';').map(t => t.trim()).filter(Boolean);
             let mudou = false;
             if (!tokens.some(t => t.startsWith('autoplay'))) { tokens.push('autoplay'); mudou = true; }
-            if (autoFullscreen && !tokens.some(t => t.startsWith('fullscreen'))) { tokens.push('fullscreen'); mudou = true; }
+            if (!tokens.some(t => t.startsWith('fullscreen'))) { tokens.push('fullscreen'); mudou = true; }
             if (!mudou || !src) return;
 
             f.setAttribute('allow', tokens.join('; '));
-            f.setAttribute('src', 'about:blank');
-            requestAnimationFrame(() => { try { f.setAttribute('src', src); } catch (e) {} });
         } catch (e) {}
     }
 
@@ -4904,9 +5161,9 @@
         for (const f of iframes) {
             if (!iframesLigados.has(f)) {
                 iframesLigados.add(f);
-                if (autoPlay) garantirPermissaoDeAutoplayNoIframe(f);
                 try { f.addEventListener('load', () => agendarBuscaEAtivacaoDeVideos(50)); } catch (e) {}
             }
+            garantirPermissaoDeAutoplayNoIframe(f);
             try {
                 const d = f.contentDocument;
                 if (d && d.documentElement) {
@@ -4987,6 +5244,10 @@
             case 'playing': {
                 const s = obterOuCriarEstadoDoVideo(video);
                 if (!s.tPlaying) s.tPlaying = Date.now();
+                if (iframeBlogger && !s.autoplaySucessoLogado) {
+                    s.autoplaySucessoLogado = true;
+                    logDiagnostico('[Autoplay] sucesso');
+                }
                 if (video.muted && precisaMudo) notificarQueAutoplayEstaMudo();
                 break;
             }
@@ -4998,7 +5259,7 @@
                 if (ehJanelaPrincipal) {
                     tentarClicarProximoServidor();
                 } else {
-                    try { window.top.postMessage({ app: 'ANIME_V44', acao: 'FALLBACK_SERVIDOR' }, '*'); } catch(err){}
+                    try { window.top.postMessage({ app: 'ANIME_V44', acao: 'FALLBACK_SERVIDOR', motivo: 'media-error' }, '*'); } catch(err){}
                 }
                 break;
             }
@@ -5192,6 +5453,7 @@
         verificarSeOEpisodioMudouNaMesmaPagina();
         solicitarDadosAniSkipAoPai();
         garantirQuePainelDeStatusEstaVisivel();
+        if (ehJanelaPrincipal && siteGoyabu) garantirPlayerHdGoyabu();
         const docs = coletarTodosOsDocumentosIncluindoIframes(document, [], 0);
         buscarERecusarPopupDeContinuarAssistindo(docs);
 
@@ -5238,8 +5500,15 @@
         if (jaAvancou) return;
 
         if (ehJanelaPrincipal) {
-            if (!autoFHDControlandoSelecao()) {
-                if (videoAtivo && (videoAtivo.currentTime > 0 || !videoAtivo.paused)) {
+            if (siteGoyabu) {
+                garantirPlayerHdGoyabu();
+                watchdogTempo = 0;
+            } else if (!autoFHDControlandoSelecao()) {
+                const videoProgredindo = videoAtivo &&
+                    (videoAtivo.currentTime > 0 || !videoAtivo.paused);
+                if (videoProgredindo) {
+                    watchdogTempo = 0;
+                } else if (iframeCrossOriginDePlayerExiste()) {
                     watchdogTempo = 0;
                 } else if (autoPlay) {
                     watchdogTempo++;
