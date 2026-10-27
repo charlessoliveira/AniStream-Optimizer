@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AniStream Optimizer (Autoplay + Auto-Next + SPA + AniSkip)
 // @namespace    http://tampermonkey.net/
-// @version      1.3.2
+// @version      1.3.3
 // @description  Autoplay persistente, auto-next, suporte a SPA, recusa automática de retomada e pulo de abertura/encerramento via AniSkip.
 // @author       Você (com apoio do Claude e do Gemini)
 // @license      MIT
@@ -2280,7 +2280,11 @@
     function obterRaizesDoPlayerParaRetomada(doc) {
         const seletoresPorHost = [
             { dominio: 'anroll.io', seletores: ['#ep-player-box', '.ep-player-box'] },
-            { dominio: 'animesonline.io', seletores: ['#pembed', '.player-embed'] },
+            {
+                dominio: 'animesonline.io',
+                seletores: ['#pembed', '.player-embed', '#video_player', '.jwplayer', '.vjs-modal-dialog', '[role="dialog"][aria-modal="true"]'],
+                somenteRaizesDoPlayer: true
+            },
             { dominio: 'anidrive.click', seletores: ['#video_player', '.jwplayer'] }
         ];
         const raizes = [];
@@ -2292,6 +2296,7 @@
             for (const seletor of config.seletores) {
                 try { doc.querySelectorAll(seletor).forEach(el => raizes.push(el)); } catch (e) {}
             }
+            if (config.somenteRaizesDoPlayer) return Array.from(new Set(raizes));
         }
 
         // Players de outros sites usam estruturas variadas; inclui diálogos e overlays comuns.
@@ -2323,15 +2328,20 @@
         return partes.filter(Boolean).some(texto => /(?:^|[^a-z0-9])(?:no|decline|dismiss|cancel|restart|start[-_]over)(?:$|[^a-z0-9])/i.test(texto));
     }
 
-    function contextoIndicaRetomada(el, raiz) {
-        const regexRetomada = /continuar.{0,80}(?:onde parou|assistindo|ultima posicao|ultimo ponto)|(?:onde parou|ultima posicao|ultimo ponto).{0,80}continuar|retomar(?:.{0,60}(?:video|reproducao|assistindo|de onde))?|\bresume\b.{0,80}(?:playback|watching|from|position)?|continue.{0,80}(?:watching|from|playback|where)|where you left off|last (?:watched|playback) position/i;
+    function contextoIndicaRetomada(el) {
+        const seletoresModalRetomada = '[role="dialog"], [aria-modal="true"], .jw-modal, .jw-overlay, .vjs-modal-dialog, [class*="resume"], [id*="resume"], [class*="continue"], [id*="continue"], [class*="modal"], [id*="modal"], [class*="dialog"], [id*="dialog"]';
+        const regexRetomada = /continuar.{0,80}(?:onde parou|assistindo)|retomar|\bresume\b|continue.{0,40}(?:watching|from|playback|where)|where you left off/i;
         let atual = el;
         for (let nivel = 0; atual && nivel < 12; nivel++, atual = atual.parentElement) {
-            let texto = '';
-            try { texto = atual.innerText || atual.textContent || ''; } catch (e) {}
-            if (texto.length > 1800) break;
-            if (regexRetomada.test(normalizarTextoParaComparacao(texto))) return true;
-            if (atual === raiz || atual === el.ownerDocument.body) break;
+            if (atual !== el.ownerDocument.body && atual.matches &&
+                atual.matches(seletoresModalRetomada) &&
+                elementoVisivelParaRetomada(atual)) {
+                let textoModal = '';
+                try { textoModal = atual.innerText || atual.textContent || ''; } catch (e) {}
+                if (textoModal.length <= 1800 &&
+                    regexRetomada.test(normalizarTextoParaComparacao(textoModal))) return true;
+            }
+            if (atual === el.ownerDocument.body) break;
         }
         return false;
     }
@@ -2353,30 +2363,45 @@
         } catch (e) {}
     }
 
+    function ehLinkDeNavegacao(el) {
+        const a = el.closest?.('a[href]');
+        if (!a) return false;
+        const href = a.getAttribute('href') || '';
+        return href && !/^(#|javascript:)/i.test(href);
+    }
+
     function clicarBotaoDeRecusaEZerarVideo(el) {
-        try { el.click(); } catch (e) {}
+        if (!el || ehLinkDeNavegacao(el)) return false;
+        if (!el.matches('#btn_resume_no, bt, button, input[type="button"], input[type="submit"], [role="button"], .jw-button-color, .plyr__control, .vjs-control')) return false;
+        console.info('[AniStream][Resume] recusando', {
+            tag: el.tagName, id: el.id, className: el.className,
+            text: (el.innerText || el.textContent || '').slice(0, 100),
+            href: el.closest?.('a[href]')?.href || null
+        });
+        try { el.click(); } catch (e) { return false; }
         forcarVideoParaComecarDoZero(el.ownerDocument);
+        return true;
     }
 
     function buscarERecusarPopupDeContinuarAssistindo(docs = [document]) {
         if (!recusarRetomar) return;
         // O Anidrive usa <bt id="btn_resume_no">, um elemento personalizado que
         // não corresponde a button. Incluí-lo evita que o contador escolha "Sim".
-        const seletoresControles = '#btn_resume_no, bt, button, a, [role="button"], [onclick], [aria-label], [title], input[type="button"], input[type="submit"], .jw-button-color, .plyr__control, .vjs-control, div, span';
+        const seletoresControles = '#btn_resume_no, button, input[type="button"], input[type="submit"], [role="button"], bt, .jw-button-color, .plyr__control, .vjs-control';
         const regexRecusa = /^(?:nao\b|no\b|cancel(?:ar)?\b|fechar\b|recomec(?:ar|e)\b|restart\b|start over\b|do (?:zero|inicio|comeco)\b|comecar do (?:zero|inicio|comeco)\b|begin from start\b|start from beginning\b)/i;
         for (const doc of docs) {
             try {
-                // No Anidrive usado pelo AnimesOnline, o texto ao redor do diálogo
-                // pode variar. O ID do botão é específico e já identifica a recusa.
+                // O ID específico do player não dispensa a validação do modal de retomada.
                 let host = '';
                 try { host = doc.location.hostname; } catch (e) {}
                 if (hostCorrespondeADominio(host, 'anidrive.click')) {
                     const botaoRecusar = doc.querySelector('#btn_resume_no');
                     if (botaoRecusar && !botoesDeRecusaDeRetomadaProcessados.has(botaoRecusar) &&
                         elementoVisivelParaRetomada(botaoRecusar) && !botaoRecusar.disabled &&
-                        botaoRecusar.getAttribute('aria-disabled') !== 'true') {
+                        botaoRecusar.getAttribute('aria-disabled') !== 'true' &&
+                        contextoIndicaRetomada(botaoRecusar) &&
+                        clicarBotaoDeRecusaEZerarVideo(botaoRecusar)) {
                         botoesDeRecusaDeRetomadaProcessados.add(botaoRecusar);
-                        clicarBotaoDeRecusaEZerarVideo(botaoRecusar);
                         exibirMensagemBreveNoPainel('🙅 Retomada recusada; começando do início.');
                         return;
                     }
@@ -2391,14 +2416,14 @@
                         if (controlesVisitados.has(el)) continue;
                         controlesVisitados.add(el);
                         if (botoesDeRecusaDeRetomadaProcessados.has(el) || !elementoVisivelParaRetomada(el)) continue;
-                        if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+                        if (el.disabled || el.getAttribute('aria-disabled') === 'true' || ehLinkDeNavegacao(el)) continue;
 
                         const rotulos = textoDoControleDeRetomada(el);
                         if (!rotulos.some(txt => txt.length <= 90 && regexRecusa.test(txt)) && !acaoDoControleIndicaRecusa(el)) continue;
-                        if (!contextoIndicaRetomada(el, raiz)) continue;
+                        if (!contextoIndicaRetomada(el)) continue;
 
+                        if (!clicarBotaoDeRecusaEZerarVideo(el)) continue;
                         botoesDeRecusaDeRetomadaProcessados.add(el);
-                        clicarBotaoDeRecusaEZerarVideo(el);
                         exibirMensagemBreveNoPainel('🙅 Retomada recusada; começando do início.');
                         return;
                     }

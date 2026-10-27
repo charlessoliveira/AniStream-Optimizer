@@ -1,3 +1,7 @@
+AniStream Optimizer 1.3.3
+
+- Corrige a recusa automática de retomada para não clicar em links e exigir um modal de retomada explícito no player, especialmente no AnimesOnline.
+
 AniStream Optimizer 1.3.2
 
 - Corrige a seleção de player no Goyabu: prioriza HD, não alterna servidores por ausência de vídeo detectável e tenta fallback apenas após erro confirmado.

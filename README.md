@@ -2,7 +2,7 @@
 
 Userscript para automatizar e personalizar a reprodução de episódios de anime. O código também está publicado no [Greasy Fork](https://greasyfork.org/pt-BR/scripts/597329-anistream-optimizer-autoplay-auto-next-spa-aniskip).
 
-Versão do repositório: **1.3.2**.
+Versão do repositório: **1.3.3**.
 
 ## Recursos
 
@@ -24,6 +24,10 @@ Versão do repositório: **1.3.2**.
 - Corrige a seleção de player no Goyabu: prioriza HD, não alterna servidores por ausência de vídeo detectável e tenta fallback apenas após erro confirmado.
 - Ajusta autoplay em iframes Blogger para iniciar silenciado e aplica permissões sem recarregar o iframe.
 - Impede que controles genéricos de resultados de busca sejam acionados pelo autoclicker; o duplo clique no botão flutuante também solicita fullscreen nativo durante o gesto.
+
+### 1.3.3
+
+- Corrige a recusa automática de retomada para não clicar em links e exigir um modal de retomada explícito no player, especialmente no AnimesOnline.
 
 ### 1.3.1
 

@@ -1406,6 +1406,103 @@ test('AniSkip sem tempos válidos não bloqueia autoplay nem o Auto-Next', () =>
     assert.equal(avancos, 1);
 });
 
+test('recusa de retomada no AnimesOnline limita raízes ao player', () => {
+    const seletoresConsultados = [];
+    const doc = {
+        location: { hostname: 'animesonline.io' },
+        body: { id: 'body' },
+        querySelectorAll(seletor) {
+            seletoresConsultados.push(seletor);
+            return [{ seletor }];
+        }
+    };
+    const contexto = {
+        hostCorrespondeADominio: (host, dominio) => host === dominio
+    };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('obterRaizesDoPlayerParaRetomada', 'elementoVisivelParaRetomada'), contexto);
+
+    const raizes = contexto.obterRaizesDoPlayerParaRetomada(doc);
+    assert.deepEqual(seletoresConsultados, [
+        '#pembed', '.player-embed', '#video_player', '.jwplayer',
+        '.vjs-modal-dialog', '[role="dialog"][aria-modal="true"]'
+    ]);
+    assert.equal(raizes.length, seletoresConsultados.length);
+    assert.equal(raizes.includes(doc.body), false);
+});
+
+test('contexto de recusa exige texto explícito no próprio modal visível', () => {
+    const body = {
+        innerText: 'Continuar assistindo de onde parou',
+        matches: seletor => seletor.includes('[class*="resume"]'),
+        parentElement: null
+    };
+    const criarEstrutura = textoModal => {
+        const modal = {
+            innerText: textoModal,
+            ownerDocument: { body },
+            parentElement: body,
+            matches: seletor => seletor.includes('[role="dialog"]'),
+            isConnected: true,
+            getClientRects: () => [1]
+        };
+        const botao = {
+            ownerDocument: { body },
+            parentElement: modal,
+            matches: () => false
+        };
+        return { botao };
+    };
+    const contexto = {
+        elementoVisivelParaRetomada: elemento => elemento.isConnected,
+        normalizarTextoParaComparacao: texto => texto.toLowerCase()
+    };
+    vm.createContext(contexto);
+    vm.runInContext(extrairFuncao('contextoIndicaRetomada', 'forcarVideoParaComecarDoZero'), contexto);
+
+    const modalDeRetomada = criarEstrutura('Deseja continuar assistindo de onde parou?');
+    assert.equal(contexto.contextoIndicaRetomada(modalDeRetomada.botao), true);
+
+    const modalSemTexto = criarEstrutura('Deseja começar do zero?');
+    assert.equal(contexto.contextoIndicaRetomada(modalSemTexto.botao), false);
+});
+
+test('recusa nunca clica em link de navegação e registra o clique seguro antes de executá-lo', () => {
+    const eventos = [];
+    const linkReal = {
+        href: 'https://animesonline.io/anime/outro-anime/',
+        getAttribute: () => 'https://animesonline.io/anime/outro-anime/'
+    };
+    const criarBotao = (anchor = null) => ({
+        tagName: 'BUTTON',
+        id: 'resume-no',
+        className: 'resume-control',
+        innerText: 'Não',
+        textContent: 'Não',
+        ownerDocument: {},
+        closest: seletor => seletor === 'a[href]' ? anchor : null,
+        matches: seletor => seletor.includes('button'),
+        click() { eventos.push('click'); }
+    });
+    const contexto = {
+        console: { info: (mensagem, dados) => eventos.push({ mensagem, dados }) },
+        forcarVideoParaComecarDoZero: () => eventos.push('reset')
+    };
+    vm.createContext(contexto);
+    vm.runInContext([
+        extrairFuncao('ehLinkDeNavegacao', 'clicarBotaoDeRecusaEZerarVideo'),
+        extrairFuncao('clicarBotaoDeRecusaEZerarVideo', 'buscarERecusarPopupDeContinuarAssistindo')
+    ].join('\n'), contexto);
+
+    assert.equal(contexto.clicarBotaoDeRecusaEZerarVideo(criarBotao(linkReal)), false);
+    assert.deepEqual(eventos, []);
+
+    assert.equal(contexto.clicarBotaoDeRecusaEZerarVideo(criarBotao()), true);
+    assert.equal(eventos[0].mensagem, '[AniStream][Resume] recusando');
+    assert.equal(eventos[0].dados.href, null);
+    assert.deepEqual(eventos.slice(1), ['click', 'reset']);
+});
+
 test('JSON inválido da API AniSkip rejeita a requisição sem dados falsos', async () => {
     const contexto = {
         GM_xmlhttpRequest(opcoes) {
